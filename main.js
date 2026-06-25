@@ -272,14 +272,34 @@ for (const s of boundarySegs) {
 }
 
 // ---------- flippers ----------
-function makeFlipperVisual(cfg, color) {
-  const mat = new THREE.MeshStandardMaterial({ color: 0x110522, emissive: color, emissiveIntensity: 1.2, metalness: 0.5, roughness: 0.25 });
-  const geo = new THREE.CapsuleGeometry(cfg.radius, Math.max(cfg.length - cfg.radius * 2, 0.2), 4, 8);
+// Glassy white-cyan neon flippers, matching the reference cabinet's flipper finish.
+function makeFlipperVisual(cfg) {
+  const bodyMat = new THREE.MeshStandardMaterial({
+    color: 0xeafdff,
+    emissive: 0x6dfcff,
+    emissiveIntensity: 0.55,
+    metalness: 0.2,
+    roughness: 0.15,
+    transparent: true,
+    opacity: 0.82,
+  });
+  const rimMat = new THREE.MeshStandardMaterial({ color: 0x0a1820, emissive: 0x6dfcff, emissiveIntensity: 2.2, metalness: 0.3, roughness: 0.2 });
+
+  const bodyLen = Math.max(cfg.length - cfg.radius * 2, 0.2);
+  const geo = new THREE.CapsuleGeometry(cfg.radius * 0.82, bodyLen, 4, 8);
   geo.rotateZ(Math.PI / 2); // capsule default is vertical; make it horizontal along local +X
-  const mesh = new THREE.Mesh(geo, mat);
+  const mesh = new THREE.Mesh(geo, bodyMat);
   mesh.position.x = cfg.length / 2; // shift so local origin = pivot end
+
+  // thin glowing cyan rim outline tracing the flipper edge
+  const rimGeo = new THREE.CapsuleGeometry(cfg.radius * 0.9, bodyLen, 4, 8);
+  rimGeo.rotateZ(Math.PI / 2);
+  const rim = new THREE.Mesh(rimGeo, rimMat);
+  rim.position.x = cfg.length / 2;
+  rim.material.side = THREE.BackSide;
+
   const holder = new THREE.Group();
-  holder.add(mesh);
+  holder.add(rim, mesh);
   scene.add(holder);
   return holder;
 }
@@ -287,9 +307,9 @@ function makeFlipperVisual(cfg, color) {
 const leftFlipper = new Flipper(FLIPPERS.left);
 const rightFlipper = new Flipper(FLIPPERS.right);
 const midFlipper = new Flipper(FLIPPERS.mid);
-const leftFlipperMesh = makeFlipperVisual(FLIPPERS.left, 0x6dfcff);
-const rightFlipperMesh = makeFlipperVisual(FLIPPERS.right, 0xff2ad1);
-const midFlipperMesh = makeFlipperVisual(FLIPPERS.mid, 0xfffb6d);
+const leftFlipperMesh = makeFlipperVisual(FLIPPERS.left);
+const rightFlipperMesh = makeFlipperVisual(FLIPPERS.right);
+const midFlipperMesh = makeFlipperVisual(FLIPPERS.mid);
 
 function updateFlipperVisual(flipper, mesh) {
   mesh.position.set(toWorldX(flipper.pivotX), 0.75, toWorldZ(flipper.pivotY));
@@ -317,25 +337,26 @@ const dataNodes = DATA_NODES.map((n) => {
   return { ...n, mesh, lit: false };
 });
 
-// ---------- the compiler (spinning bumper cluster) ----------
+// ---------- the compiler (twin neon pop-bumper banks) ----------
 const compilerGroup = new THREE.Group();
 compilerGroup.position.set(toWorldX(COMPILER.x), 1.0, toWorldZ(COMPILER.y));
 scene.add(compilerGroup);
-const compilerCoreMat = new THREE.MeshStandardMaterial({ color: 0x1a0830, emissive: 0xff2ad1, emissiveIntensity: 1.4, metalness: 0.6, roughness: 0.2 });
-const compilerBumperMeshes = COMPILER.bumpers.map((b) => {
-  const geo = new THREE.CylinderGeometry(b.r, b.r, 1.1, 14);
-  const mesh = new THREE.Mesh(geo, compilerCoreMat);
-  mesh.position.set(b.dx, 0, -b.dy);
-  compilerGroup.add(mesh);
-  return mesh;
+const compilerRingColors = [0x6dfcff, 0xff2ad1, 0xb14bff];
+const compilerBumperMeshes = COMPILER.bumpers.map((b, i) => {
+  const color = compilerRingColors[i % compilerRingColors.length];
+  const capMat = new THREE.MeshStandardMaterial({ color: 0x0c0818, emissive: color, emissiveIntensity: 0.55, metalness: 0.6, roughness: 0.25 });
+  const ringMat = new THREE.MeshStandardMaterial({ color: 0x050308, emissive: color, emissiveIntensity: 2.4, metalness: 0.4, roughness: 0.2 });
+  const group = new THREE.Group();
+  const cap = new THREE.Mesh(new THREE.CylinderGeometry(b.r * 0.82, b.r * 0.82, 1.0, 16), capMat);
+  group.add(cap);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(b.r * 0.82, b.r * 0.16, 10, 24), ringMat);
+  ring.rotation.x = Math.PI / 2;
+  ring.position.y = 0.56;
+  group.add(ring);
+  group.position.set(b.dx, 0, -b.dy);
+  compilerGroup.add(group);
+  return group;
 });
-{
-  const coreGeo = new THREE.OctahedronGeometry(0.9, 0);
-  const coreMesh = new THREE.Mesh(coreGeo, new THREE.MeshStandardMaterial({ color: 0x220a3a, emissive: 0x6dfcff, emissiveIntensity: 1.6 }));
-  coreMesh.position.y = 0.6;
-  compilerGroup.add(coreMesh);
-}
-let compilerAngle = 0;
 
 // ---------- firewall gate ----------
 const firewallGroup = new THREE.Group();
@@ -661,15 +682,11 @@ function stepPhysics(dt) {
     ball.stallTime = 0;
   }
 
-  // compiler bumper cluster (rotating offsets)
+  // compiler bumper banks (static twin clusters)
   let compilerHit = false;
   for (const b of COMPILER.bumpers) {
-    const ca = Math.cos(compilerAngle);
-    const sa = Math.sin(compilerAngle);
-    const dxr = b.dx * ca - b.dy * sa;
-    const dyr = b.dx * sa + b.dy * ca;
-    const cx = COMPILER.x + dxr;
-    const cy = COMPILER.y + dyr;
+    const cx = COMPILER.x + b.dx;
+    const cy = COMPILER.y + b.dy;
     if (collideBallCircle(ball, cx, cy, b.r, COMPILER.restitution)) compilerHit = true;
   }
   if (compilerHit) onCompilerHit();
@@ -844,7 +861,6 @@ function syncVisuals() {
   updateFlipperVisual(rightFlipper, rightFlipperMesh);
   updateFlipperVisual(midFlipper, midFlipperMesh);
 
-  compilerGroup.rotation.y = -compilerAngle;
   portalRing.rotation.z += 0.004;
   warpRing.rotation.z -= 0.01;
   starfield.rotation.y += 0.0006;
@@ -882,8 +898,6 @@ function frame(now) {
   if (game.charging) {
     game.plungerCharge += dt * 1000;
   }
-
-  compilerAngle += dt * 1.1;
 
   if (game.state === 'playing' || game.state === 'ready') {
     // flippers stay live (and the lane ball stays put via ball.mode) even before launch

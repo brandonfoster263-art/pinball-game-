@@ -92,13 +92,18 @@ export const DATA_NODES = [
   { x: 8.2, y: 29.5, r: 1.0 },
 ];
 
+// Two static bumper clusters flanking the central lane, mirroring the reference
+// cabinet's left/right pop-bumper banks instead of one spinning center cluster.
 export const COMPILER = {
   x: 0,
-  y: 19.5,
+  y: 22,
   bumpers: [
-    { dx: 0, dy: 1.7, r: 1.55 },
-    { dx: -1.55, dy: -0.9, r: 1.3 },
-    { dx: 1.55, dy: -0.9, r: 1.3 },
+    { dx: -4.4, dy: 1.7, r: 1.15 },
+    { dx: -4.4, dy: -0.3, r: 1.0 },
+    { dx: -4.0, dy: -2.3, r: 0.9 },
+    { dx: 4.4, dy: 1.7, r: 1.15 },
+    { dx: 4.4, dy: -0.3, r: 1.0 },
+    { dx: 4.0, dy: -2.3, r: 0.9 },
   ],
   restitution: 0.92,
 };
