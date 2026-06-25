@@ -1,5 +1,6 @@
 import * as THREE from './vendor/three/three.module.min.js';
 import { Flipper, collideBallSegment, collideBallCircle, clamp, len } from './physics.js';
+import { Sfx, unlockAudio } from './audio.js';
 import {
   TABLE_HALF_W,
   TABLE_TOP,
@@ -533,6 +534,7 @@ function updateHud() {
 // =====================================================================
 const keyState = {};
 window.addEventListener('keydown', (e) => {
+  unlockAudio();
   if (keyState[e.code]) return;
   keyState[e.code] = true;
   handleKeyDown(e.code);
@@ -543,9 +545,9 @@ window.addEventListener('keyup', (e) => {
 });
 
 function handleKeyDown(code) {
-  if (code === 'ArrowLeft' || code === 'KeyZ') leftFlipper.pressed = true;
-  if (code === 'ArrowRight' || code === 'Slash') rightFlipper.pressed = true;
-  if (code === 'KeyX') midFlipper.pressed = true;
+  if (code === 'ArrowLeft' || code === 'KeyZ') { leftFlipper.pressed = true; Sfx.flipperPress(); }
+  if (code === 'ArrowRight' || code === 'Slash') { rightFlipper.pressed = true; Sfx.flipperPress(); }
+  if (code === 'KeyX') { midFlipper.pressed = true; Sfx.flipperPress(); }
   if (code === 'Space') {
     if (game.state === 'ready') {
       game.charging = true;
@@ -574,6 +576,7 @@ function launchBall() {
   ball.mode = 'live';
   game.state = 'playing';
   showHint(null);
+  Sfx.launch();
 }
 
 function togglePause() {
@@ -585,14 +588,19 @@ function togglePause() {
     game.state = 'paused';
     showHint('PAUSED — press P to resume');
   }
+  Sfx.uiClick();
 }
 
-startBtn.addEventListener('click', () => startGame());
+startBtn.addEventListener('click', () => {
+  unlockAudio();
+  Sfx.uiClick();
+  startGame();
+});
 
 // touch controls
 function bindTouch(id, onDown, onUp) {
   const el = document.getElementById(id);
-  const down = (e) => { e.preventDefault(); onDown(); };
+  const down = (e) => { e.preventDefault(); unlockAudio(); onDown(); };
   const up = (e) => { e.preventDefault(); onUp(); };
   el.addEventListener('touchstart', down, { passive: false });
   el.addEventListener('touchend', up, { passive: false });
@@ -600,8 +608,8 @@ function bindTouch(id, onDown, onUp) {
   el.addEventListener('mouseup', up);
   el.addEventListener('mouseleave', up);
 }
-bindTouch('t-left', () => (leftFlipper.pressed = true), () => (leftFlipper.pressed = false));
-bindTouch('t-right', () => (rightFlipper.pressed = true), () => (rightFlipper.pressed = false));
+bindTouch('t-left', () => { leftFlipper.pressed = true; Sfx.flipperPress(); }, () => (leftFlipper.pressed = false));
+bindTouch('t-right', () => { rightFlipper.pressed = true; Sfx.flipperPress(); }, () => (rightFlipper.pressed = false));
 bindTouch(
   't-launch',
   () => {
@@ -659,12 +667,12 @@ function stepPhysics(dt) {
   }
 
   for (const s of boundarySegs) {
-    collideBallSegment(ball, s.a[0], s.a[1], s.b[0], s.b[1], s.r, s.restitution);
+    if (collideBallSegment(ball, s.a[0], s.a[1], s.b[0], s.b[1], s.r, s.restitution)) Sfx.wall();
   }
 
-  leftFlipper.collide(ball, 0.55);
-  rightFlipper.collide(ball, 0.55);
-  midFlipper.collide(ball, 0.55);
+  if (leftFlipper.collide(ball, 0.55)) Sfx.flipperHit();
+  if (rightFlipper.collide(ball, 0.55)) Sfx.flipperHit();
+  if (midFlipper.collide(ball, 0.55)) Sfx.flipperHit();
 
   // anti-stall: the two main flippers' rest-position capsules overlap slightly
   // across the centerline, so an abandoned ball can settle motionless right on
@@ -689,7 +697,7 @@ function stepPhysics(dt) {
     const cy = COMPILER.y + b.dy;
     if (collideBallCircle(ball, cx, cy, b.r, COMPILER.restitution)) compilerHit = true;
   }
-  if (compilerHit) onCompilerHit();
+  if (compilerHit) { onCompilerHit(); Sfx.bumper(); }
 
   // data nodes
   for (const n of dataNodes) {
@@ -725,11 +733,13 @@ function onCompilerHit() {
 function onDataNodeHit(node) {
   if (node.lit) {
     addScore(100);
+    Sfx.dataNodeRepeat();
     return;
   }
   node.lit = true;
   node.mesh.material = nodeMat(true);
   addScore(1000);
+  Sfx.dataNode();
   game.litNodes++;
   if (game.litNodes >= dataNodes.length) {
     triggerOverload();
@@ -740,6 +750,7 @@ function triggerOverload() {
   game.overloadUntil = performance.now() + 20000;
   game.ghostBallReady = true;
   showBanner('OVERLOAD MODE!');
+  Sfx.overload();
   setTimeout(() => {
     for (const n of dataNodes) {
       n.lit = false;
@@ -753,6 +764,7 @@ let slowMoUntil = 0;
 function grantSlowMo() {
   slowMoUntil = performance.now() + 3500;
   showBanner('SLOW-MO PULSE');
+  Sfx.slowMo();
 }
 
 function handleFirewall(dt) {
@@ -769,13 +781,16 @@ function handleFirewall(dt) {
     addScore(5000);
     game.firewallCooldown = 1.2;
     showBanner('FIREWALL JACKPOT!');
+    Sfx.firewallJackpot();
   } else if (nearLine && !inGap) {
     // solid portion: collide as two segments
+    let hit;
     if (ball.x <= gapMin) {
-      collideBallSegment(ball, -FIREWALL.halfSpan, FIREWALL.y, gapMin, FIREWALL.y, FIREWALL.wallR, FIREWALL.restitution);
+      hit = collideBallSegment(ball, -FIREWALL.halfSpan, FIREWALL.y, gapMin, FIREWALL.y, FIREWALL.wallR, FIREWALL.restitution);
     } else {
-      collideBallSegment(ball, gapMax, FIREWALL.y, FIREWALL.halfSpan, FIREWALL.y, FIREWALL.wallR, FIREWALL.restitution);
+      hit = collideBallSegment(ball, gapMax, FIREWALL.y, FIREWALL.halfSpan, FIREWALL.y, FIREWALL.wallR, FIREWALL.restitution);
     }
+    if (hit) Sfx.wall();
   }
 
   // update visuals
@@ -807,6 +822,7 @@ function startWarp() {
   ball.mode = 'warping';
   addScore(3000);
   showBanner('WARP RAMP — 3x MULTIPLIER');
+  Sfx.warpRamp();
 }
 
 function updateWarp() {
@@ -833,8 +849,10 @@ function onDrain() {
     ball.y = 6;
     ball.vy = Math.abs(ball.vy) * 0.6 + 14;
     showBanner('GHOST BALL SAVE');
+    Sfx.ghostBallSave();
     return;
   }
+  Sfx.drain();
   game.balls--;
   ball.mode = 'idle';
   if (game.balls <= 0) {
@@ -843,6 +861,7 @@ function onDrain() {
     overlayTitleEl.textContent = 'GAME OVER';
     overlayMsg.textContent = `Final score ${game.score.toLocaleString()} — press SPACE / START to play again`;
     showOverlay(true, true);
+    Sfx.gameOver();
   } else {
     showBanner(`BALL ${3 - game.balls + 1}`, 1200);
     resetBallToLane();
