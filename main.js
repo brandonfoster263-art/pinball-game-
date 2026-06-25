@@ -79,12 +79,18 @@ grid.position.y = -6;
 scene.add(grid);
 
 // ---------- table bed ----------
+const textureLoader = new THREE.TextureLoader();
+const playfieldTexture = textureLoader.load('./assets/playfield-galaxy.jpg');
+playfieldTexture.colorSpace = THREE.SRGBColorSpace;
 const bedGeo = new THREE.PlaneGeometry(TABLE_HALF_W * 2 + 4, TABLE_TOP + 6);
 const bedMat = new THREE.MeshStandardMaterial({
-  color: 0x0a0820,
-  emissive: 0x130a30,
-  metalness: 0.3,
-  roughness: 0.7,
+  map: playfieldTexture,
+  color: 0xffffff,
+  emissiveMap: playfieldTexture,
+  emissive: 0xffffff,
+  emissiveIntensity: 0.35,
+  metalness: 0.2,
+  roughness: 0.6,
 });
 const bed = new THREE.Mesh(bedGeo, bedMat);
 bed.rotation.x = -Math.PI / 2;
