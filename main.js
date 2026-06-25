@@ -24,7 +24,7 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x040212);
-scene.fog = new THREE.FogExp2(0x050214, 0.012);
+scene.fog = new THREE.FogExp2(0x050214, 0.006);
 
 const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.1, 300);
 function placeCamera() {
@@ -109,6 +109,128 @@ scene.add(bed);
   const geo = new THREE.BufferGeometry().setFromPoints(pts);
   const mat = new THREE.LineBasicMaterial({ color: 0x6dfcff, transparent: true, opacity: 0.35 });
   scene.add(new THREE.Line(geo, mat));
+}
+
+// ---------- cabinet: black trim + headboard backglass ----------
+{
+  const FRONT_Z = toWorldZ(-3);      // front apron edge (near the player)
+  const BACK_Z = toWorldZ(TABLE_TOP + 1); // back edge under the backbox
+  const MID_Z = (FRONT_Z + BACK_Z) / 2;
+  const DEPTH = FRONT_Z - BACK_Z;    // total playfield length in world z
+  const RAIL_X = TABLE_HALF_W + 1.7; // black side rails sit just outside the walls
+
+  // glossy black cabinet material (the polished machine body)
+  const cabMat = new THREE.MeshStandardMaterial({
+    color: 0x050409,
+    emissive: 0x0b0418,
+    emissiveIntensity: 0.6,
+    metalness: 0.65,
+    roughness: 0.35,
+  });
+  // thin magenta neon pinstripe that runs along the cabinet edges
+  const pinkPinstripe = new THREE.MeshBasicMaterial({ color: 0xff2ad1 });
+  const cyanPinstripe = new THREE.MeshBasicMaterial({ color: 0x6dfcff });
+
+  const cabinet = new THREE.Group();
+  scene.add(cabinet);
+
+  // solid machine body below the playfield (gives the table real mass)
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(RAIL_X * 2 + 1.4, 9, DEPTH + 2),
+    cabMat
+  );
+  body.position.set(0, -4.6, MID_Z);
+  cabinet.add(body);
+
+  // left + right side rails framing the playfield, raised above the surface
+  const railGeo = new THREE.BoxGeometry(1.7, 2.8, DEPTH + 2);
+  for (const sx of [-1, 1]) {
+    const rail = new THREE.Mesh(railGeo, cabMat);
+    rail.position.set(sx * RAIL_X, 0.9, MID_Z);
+    cabinet.add(rail);
+    // neon pinstripe along the inner-top edge of each rail
+    const stripe = new THREE.Mesh(
+      new THREE.BoxGeometry(0.16, 0.16, DEPTH + 2),
+      sx < 0 ? cyanPinstripe : pinkPinstripe
+    );
+    stripe.position.set(sx * (RAIL_X - 0.85), 2.25, MID_Z);
+    cabinet.add(stripe);
+  }
+
+  // front apron (the lip nearest the player, below the flippers)
+  const apron = new THREE.Mesh(
+    new THREE.BoxGeometry(RAIL_X * 2 + 1.4, 2.8, 4),
+    cabMat
+  );
+  apron.position.set(0, 0.9, FRONT_Z + 1.4);
+  cabinet.add(apron);
+  const apronStripe = new THREE.Mesh(
+    new THREE.BoxGeometry(RAIL_X * 2 + 1.4, 0.16, 0.16),
+    pinkPinstripe
+  );
+  apronStripe.position.set(0, 2.25, FRONT_Z - 0.5);
+  cabinet.add(apronStripe);
+
+  // ---------- backbox + backglass headboard ----------
+  const backbox = new THREE.Group();
+  backbox.position.set(0, 0, BACK_Z - 2.6);
+  scene.add(backbox);
+
+  const TILT = -0.26;     // lean the headboard back, toward the player's view
+  const GLASS_W = 32;
+  const GLASS_H = 10.85;  // matches the 2.95:1 backglass texture aspect
+  const FRAME = 1.1;
+  const BASE_Y = 11;      // bottom of the glass sits above the portal ring
+  const CY = BASE_Y + GLASS_H / 2; // glass/shell center height
+  // small offsets so the glass face floats just ahead of the shell, sharing tilt
+  const offY = Math.sin(-TILT) * 0.75;
+  const offZ = Math.cos(TILT) * 0.75;
+
+  // black backbox cabinet shell that the glass sits in
+  const shell = new THREE.Mesh(
+    new THREE.BoxGeometry(GLASS_W + FRAME * 2, GLASS_H + FRAME * 2, 1.4),
+    cabMat
+  );
+  shell.position.set(0, CY, 0);
+  shell.rotation.x = TILT;
+  backbox.add(shell);
+
+  // a short black neck connecting the backbox down to the playfield deck
+  const neck = new THREE.Mesh(new THREE.BoxGeometry(GLASS_W + FRAME * 2, BASE_Y, 2.2), cabMat);
+  neck.position.set(0, BASE_Y / 2, 1.0);
+  backbox.add(neck);
+
+  // the glowing backglass artwork itself
+  const glassTex = textureLoader.load('./assets/backglass.jpg');
+  glassTex.colorSpace = THREE.SRGBColorSpace;
+  const glassMat = new THREE.MeshStandardMaterial({
+    map: glassTex,
+    emissiveMap: glassTex,
+    emissive: 0xffffff,
+    emissiveIntensity: 1.2,
+    metalness: 0.1,
+    roughness: 0.5,
+    side: THREE.DoubleSide,
+  });
+  const glass = new THREE.Mesh(new THREE.PlaneGeometry(GLASS_W, GLASS_H), glassMat);
+  glass.position.set(0, CY + offY, offZ + 0.05);
+  glass.rotation.x = TILT;
+  backbox.add(glass);
+
+  // neon trim framing the backglass (magenta top, cyan bottom)
+  const topTrim = new THREE.Mesh(new THREE.BoxGeometry(GLASS_W + FRAME, 0.24, 0.24), pinkPinstripe);
+  topTrim.position.set(0, CY + GLASS_H / 2 + Math.sin(-TILT) * 0.85, Math.cos(TILT) * 0.85);
+  topTrim.rotation.x = TILT;
+  backbox.add(topTrim);
+  const botTrim = new THREE.Mesh(new THREE.BoxGeometry(GLASS_W + FRAME, 0.24, 0.24), cyanPinstripe);
+  botTrim.position.set(0, CY - GLASS_H / 2 + Math.sin(-TILT) * 0.85, Math.cos(TILT) * 0.85);
+  botTrim.rotation.x = TILT;
+  backbox.add(botTrim);
+
+  // a soft light to make the headboard read as backlit glass
+  const glassLight = new THREE.PointLight(0xb14bff, 1.4, 70, 2);
+  glassLight.position.set(0, 16, BACK_Z + 6);
+  scene.add(glassLight);
 }
 
 // ---------- helpers to build neon meshes ----------
