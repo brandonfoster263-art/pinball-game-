@@ -532,7 +532,8 @@ function spawnBall(x, y, vx, vy, mode = 'live') {
   const b = ballPool.find((p) => !p.active);
   if (!b) return null;
   b.x = x; b.y = y; b.vx = vx; b.vy = vy;
-  b.mode = mode; b.stallTime = 0; b.warpStart = 0; b.lastX = x; b.riftCd = 0;
+  b.mode = mode; b.stallTime = 0; b.stallAnchorX = null; b.stallAnchorY = null;
+  b.warpStart = 0; b.lastX = x; b.riftCd = 0;
   b.active = true;
   b.mesh.visible = true;
   b.trailHistory.length = 0;
@@ -1021,16 +1022,14 @@ function stepPhysics(dt) {
 
   updateFirewallState(dt);
 
-  const anyFlipperPressed = leftFlipper.pressed || rightFlipper.pressed || midFlipper.pressed;
-
   // iterate a snapshot since draining despawns balls mid-loop
   for (const b of [...balls]) {
     if (b.mode !== 'live') continue;
-    stepOneBall(b, dt, anyFlipperPressed);
+    stepOneBall(b, dt);
   }
 }
 
-function stepOneBall(b, dt, anyFlipperPressed) {
+function stepOneBall(b, dt) {
   b.vy += GRAVITY * dt;
   b.x += b.vx * dt;
   b.y += b.vy * dt;
@@ -1051,21 +1050,6 @@ function stepOneBall(b, dt, anyFlipperPressed) {
   if (rightFlipper.collide(b, 0.55)) { Sfx.flipperHit(); buzz(12); }
   if (midFlipper.collide(b, 0.55)) { Sfx.flipperHit(); buzz(12); }
 
-  // anti-stall: the two main flippers' rest-position capsules overlap slightly
-  // across the centerline, so an abandoned ball can settle motionless right on
-  // that seam, sealed off from both the drain and the field. If nobody is
-  // flipping and the ball goes dead for a few seconds, route it through the
-  // normal drain check below rather than let the game appear frozen forever.
-  if (!anyFlipperPressed && len(b.vx, b.vy) < 1.2) {
-    b.stallTime += dt;
-    if (b.stallTime > 2.5) {
-      b.stallTime = 0;
-      b.y = -3;
-    }
-  } else {
-    b.stallTime = 0;
-  }
-
   // compiler bumper banks (static twin clusters, progressive value)
   for (let i = 0; i < COMPILER.bumpers.length; i++) {
     const bm = COMPILER.bumpers[i];
@@ -1079,6 +1063,30 @@ function stepOneBall(b, dt, anyFlipperPressed) {
       buzz(18);
       break; // one bumper interaction per ball per step
     }
+  }
+
+  // anti-stall: a ball wedged between a flipper and a bumper, or sitting on
+  // the centerline seam between the two main flippers, can rattle in place
+  // with non-trivial instantaneous velocity that never converts into actual
+  // movement (the discrete per-contact collision resolution can fight itself
+  // when two surfaces close in on the ball at once) — so this tracks real
+  // displacement from an anchor point rather than raw speed. It runs
+  // regardless of flipper input, since a ball can be wedged while the player
+  // is actively holding a flipper trying to free it. The threshold is long
+  // enough to never interrupt a normal catch-and-hold trap.
+  if (b.stallAnchorX == null) { b.stallAnchorX = b.x; b.stallAnchorY = b.y; }
+  const driftFromAnchor = len(b.x - b.stallAnchorX, b.y - b.stallAnchorY);
+  if (driftFromAnchor < 1.0) {
+    b.stallTime += dt;
+    if (b.stallTime > 3.5) {
+      b.stallTime = 0;
+      b.stallAnchorX = null;
+      b.y = -3;
+    }
+  } else {
+    b.stallTime = 0;
+    b.stallAnchorX = b.x;
+    b.stallAnchorY = b.y;
   }
 
   // data nodes
