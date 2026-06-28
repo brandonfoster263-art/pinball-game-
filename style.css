@@ -75,6 +75,70 @@ html, body {
   letter-spacing: 0.2em;
 }
 
+.mission-block .hud-value {
+  font-size: 13px;
+  font-weight: bold;
+  color: #b388ff;
+  letter-spacing: 0.08em;
+}
+
+#mute-btn {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  z-index: 7;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid #6dfcff;
+  background: rgba(8, 4, 20, 0.55);
+  color: #6dfcff;
+  font-size: 18px;
+  cursor: pointer;
+  pointer-events: auto;
+  text-shadow: 0 0 8px rgba(0, 240, 255, 0.8);
+  box-shadow: 0 0 12px rgba(109, 252, 255, 0.35);
+}
+#mute-btn.muted {
+  border-color: #ff2ad1;
+  color: #ff6ad6;
+  text-shadow: 0 0 8px rgba(255, 42, 209, 0.8);
+}
+
+#highscores {
+  margin: 4px 0 18px;
+  font-size: 12px;
+  color: #9fe8ff;
+}
+.hs-title {
+  color: #ff2ad1;
+  letter-spacing: 0.18em;
+  font-size: 11px;
+  margin-bottom: 6px;
+  text-shadow: 0 0 6px rgba(255, 42, 209, 0.8);
+}
+#hs-list {
+  list-style: none;
+  margin: 0 auto;
+  padding: 0;
+  max-width: 220px;
+  text-align: left;
+}
+#hs-list li {
+  display: flex;
+  justify-content: space-between;
+  padding: 1px 2px;
+  letter-spacing: 0.04em;
+}
+#hs-list li.you {
+  color: #fffb6d;
+  text-shadow: 0 0 8px rgba(255, 251, 109, 0.8);
+}
+#hs-list li .hs-rank {
+  color: #6dfcff;
+  margin-right: 8px;
+}
+
 .status-block {
   display: flex;
   flex-direction: row;

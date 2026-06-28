@@ -1,6 +1,6 @@
 import * as THREE from './vendor/three/three.module.min.js';
 import { Flipper, collideBallSegment, collideBallCircle, clamp, len } from './physics.js';
-import { Sfx, unlockAudio } from './audio.js';
+import { Sfx, unlockAudio, toggleMute, isMuted, startMusic } from './audio.js';
 import {
   TABLE_HALF_W,
   TABLE_TOP,
@@ -28,9 +28,33 @@ scene.background = new THREE.Color(0x040212);
 scene.fog = new THREE.FogExp2(0x050214, 0.006);
 
 const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.1, 300);
+const CAM_BASE = new THREE.Vector3(0, 34, 26);
+const CAM_LOOK = new THREE.Vector3(0, 2, toWorldZ(26));
+const camOffset = new THREE.Vector3(); // smoothed pan toward the live ball
+let shakeAmt = 0; // decaying screen-shake magnitude
+function addShake(amt) {
+  shakeAmt = Math.min(Math.max(shakeAmt, amt), 1.6);
+}
 function placeCamera() {
-  camera.position.set(0, 34, 26);
-  camera.lookAt(0, 2, toWorldZ(26));
+  camera.position.copy(CAM_BASE);
+  camera.lookAt(CAM_LOOK);
+}
+function updateCamera() {
+  const b = primaryBall();
+  let tx = 0;
+  let tz = 0;
+  if (b && b.mode === 'live') {
+    tx = clamp(b.x * 0.22, -5, 5);
+    tz = clamp((b.y - 22) * -0.07, -3, 3);
+  }
+  camOffset.x += (tx - camOffset.x) * 0.05;
+  camOffset.z += (tz - camOffset.z) * 0.05;
+  const sx = (Math.random() * 2 - 1) * shakeAmt;
+  const sy = (Math.random() * 2 - 1) * shakeAmt;
+  camera.position.set(CAM_BASE.x + camOffset.x + sx, CAM_BASE.y + sy, CAM_BASE.z + camOffset.z);
+  camera.lookAt(CAM_LOOK.x + camOffset.x * 0.4, CAM_LOOK.y, CAM_LOOK.z);
+  shakeAmt *= 0.85;
+  if (shakeAmt < 0.01) shakeAmt = 0;
 }
 placeCamera();
 
@@ -402,7 +426,30 @@ const warpRing = buildRing(0x6dfcff, 2.6, 0.28, new THREE.Vector3(WARP_RAMP.ring
   scene.add(mesh);
 }
 
-// ---------- ball ----------
+// ---------- central lightning rift (scoring lane down the middle) ----------
+const RIFT = { yMin: 6, yMax: 44, minSpeed: 12 };
+const riftMat = new THREE.MeshStandardMaterial({
+  color: 0x1a0633,
+  emissive: 0xb14bff,
+  emissiveIntensity: 1.4,
+  metalness: 0.4,
+  roughness: 0.3,
+  transparent: true,
+  opacity: 0.85,
+});
+const riftMesh = new THREE.Mesh(
+  new THREE.BoxGeometry(0.5, 0.12, RIFT.yMax - RIFT.yMin),
+  riftMat
+);
+riftMesh.position.set(0, 0.12, toWorldZ((RIFT.yMin + RIFT.yMax) / 2));
+scene.add(riftMesh);
+const riftLight = new THREE.PointLight(0xb14bff, 0.8, 30, 2);
+riftLight.position.set(0, 3, toWorldZ((RIFT.yMin + RIFT.yMax) / 2));
+scene.add(riftLight);
+
+// ---------- ball pool (supports multiball) ----------
+const MAX_BALLS = 3;
+const TRAIL_LEN = 14;
 const ballGeo = new THREE.SphereGeometry(BALL_RADIUS, 20, 20);
 const ballMat = new THREE.MeshStandardMaterial({
   color: 0xeafdff,
@@ -411,34 +458,131 @@ const ballMat = new THREE.MeshStandardMaterial({
   metalness: 0.7,
   roughness: 0.15,
 });
-const ballMesh = new THREE.Mesh(ballGeo, ballMat);
-ballMesh.position.y = BALL_RADIUS;
-scene.add(ballMesh);
-const ballLight = new THREE.PointLight(0x6dfcff, 1.2, 10, 2);
-ballMesh.add(ballLight);
 
-// neon trail
-const TRAIL_LEN = 14;
-const trailMeshes = [];
-for (let i = 0; i < TRAIL_LEN; i++) {
-  const m = new THREE.Mesh(
-    new THREE.SphereGeometry(BALL_RADIUS * (1 - i / (TRAIL_LEN + 4)), 8, 8),
-    new THREE.MeshBasicMaterial({ color: 0x6dfcff, transparent: true, opacity: 0.32 * (1 - i / TRAIL_LEN) })
-  );
-  m.visible = false;
-  scene.add(m);
-  trailMeshes.push(m);
+function createBall() {
+  const mesh = new THREE.Mesh(ballGeo, ballMat);
+  mesh.position.y = BALL_RADIUS;
+  mesh.visible = false;
+  scene.add(mesh);
+  const light = new THREE.PointLight(0x6dfcff, 1.0, 9, 2);
+  mesh.add(light);
+  const trailMeshes = [];
+  for (let i = 0; i < TRAIL_LEN; i++) {
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(BALL_RADIUS * (1 - i / (TRAIL_LEN + 4)), 8, 8),
+      new THREE.MeshBasicMaterial({ color: 0x6dfcff, transparent: true, opacity: 0.32 * (1 - i / TRAIL_LEN) })
+    );
+    m.visible = false;
+    scene.add(m);
+    trailMeshes.push(m);
+  }
+  return {
+    x: PLUNGER.x, y: PLUNGER.restY, vx: 0, vy: 0, radius: BALL_RADIUS,
+    mode: 'idle', stallTime: 0, warpStart: 0, lastX: PLUNGER.x, riftCd: 0,
+    active: false, mesh, light, trailMeshes, trailHistory: [],
+  };
 }
-const trailHistory = [];
+const ballPool = Array.from({ length: MAX_BALLS }, createBall);
+let balls = []; // currently-active balls in play
+
+function spawnBall(x, y, vx, vy, mode = 'live') {
+  const b = ballPool.find((p) => !p.active);
+  if (!b) return null;
+  b.x = x; b.y = y; b.vx = vx; b.vy = vy;
+  b.mode = mode; b.stallTime = 0; b.warpStart = 0; b.lastX = x; b.riftCd = 0;
+  b.active = true;
+  b.mesh.visible = true;
+  b.trailHistory.length = 0;
+  balls.push(b);
+  return b;
+}
+
+function despawnBall(b) {
+  b.active = false;
+  b.mode = 'idle';
+  b.mesh.visible = false;
+  b.trailHistory.length = 0;
+  for (const tm of b.trailMeshes) tm.visible = false;
+  const i = balls.indexOf(b);
+  if (i >= 0) balls.splice(i, 1);
+}
+
+function clearBalls() {
+  for (const b of [...balls]) despawnBall(b);
+}
+
+function primaryBall() {
+  return balls.find((b) => b.mode === 'live') || balls[0] || null;
+}
+
+// ---------- particle burst pool ----------
+const PARTICLE_COUNT = 96;
+const particleGeo = new THREE.SphereGeometry(0.16, 6, 6);
+const particles = Array.from({ length: PARTICLE_COUNT }, () => {
+  const mesh = new THREE.Mesh(
+    particleGeo,
+    new THREE.MeshBasicMaterial({ color: 0x6dfcff, transparent: true, opacity: 1 })
+  );
+  mesh.visible = false;
+  scene.add(mesh);
+  return { mesh, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 1, active: false };
+});
+
+function emitBurst(wx, wy, wz, colorHex, count = 12, speed = 9) {
+  for (let i = 0; i < count; i++) {
+    const p = particles.find((q) => !q.active);
+    if (!p) return;
+    p.active = true;
+    p.mesh.visible = true;
+    p.mesh.material.color.setHex(colorHex);
+    p.mesh.material.opacity = 1;
+    p.mesh.scale.setScalar(1);
+    p.mesh.position.set(wx, wy, wz);
+    const ang = Math.random() * Math.PI * 2;
+    const sp = speed * (0.4 + Math.random() * 0.6);
+    p.vx = Math.cos(ang) * sp;
+    p.vz = Math.sin(ang) * sp;
+    p.vy = 3 + Math.random() * speed * 0.7;
+    p.maxLife = 0.45 + Math.random() * 0.35;
+    p.life = p.maxLife;
+  }
+}
+
+function updateParticles(dt) {
+  for (const p of particles) {
+    if (!p.active) continue;
+    p.life -= dt;
+    if (p.life <= 0) {
+      p.active = false;
+      p.mesh.visible = false;
+      continue;
+    }
+    p.vy -= 22 * dt;
+    p.mesh.position.x += p.vx * dt;
+    p.mesh.position.y += p.vy * dt;
+    p.mesh.position.z += p.vz * dt;
+    const f = p.life / p.maxLife;
+    p.mesh.material.opacity = f;
+    p.mesh.scale.setScalar(0.3 + f * 0.7);
+  }
+}
+
+// world position helper for table-space (x, y)
+function worldBurst(tx, ty, colorHex, count, speed) {
+  emitBurst(toWorldX(tx), 1.2, toWorldZ(ty), colorHex, count, speed);
+}
+
+// short haptic pulse on mobile, guarded for support
+function buzz(ms) {
+  if (navigator.vibrate) navigator.vibrate(ms);
+}
 
 // =====================================================================
 // GAME STATE
 // =====================================================================
-const ball = { x: PLUNGER.x, y: PLUNGER.restY, vx: 0, vy: 0, radius: BALL_RADIUS, mode: 'idle', stallTime: 0 };
-
 const GRAVITY = -30;
 const game = {
-  state: 'menu', // menu | ready | playing | warping | paused | gameover
+  state: 'menu', // menu | ready | playing | paused | gameover
   score: 0,
   balls: 3,
   litNodes: 0,
@@ -451,7 +595,88 @@ const game = {
   pausedFromState: null,
   plungerCharge: 0,
   charging: false,
+  // new mechanics
+  ballSaveUntil: 0,
+  tiltMeter: 0,
+  tiltedUntil: 0,
+  missionIndex: 0,
+  compilerMissionHits: 0,
+  firstNodeTime: 0,
+  isNewHighScore: false,
 };
+
+const BALL_SAVE_MS = 6000;
+
+// ---------- progressive missions ----------
+const MISSIONS = [
+  { type: 'nodes', text: 'Light all 5 Data Nodes', bonus: 4000 },
+  { type: 'compiler', text: 'Hit the Compiler x5', bonus: 5000 },
+  { type: 'firewall', text: 'Breach the Firewall gate', bonus: 8000 },
+  { type: 'warp', text: 'Enter the Warp Rift', bonus: 10000 },
+];
+
+function currentMission() {
+  return MISSIONS[game.missionIndex % MISSIONS.length];
+}
+
+function completeMission(type) {
+  if (game.state !== 'playing') return;
+  if (currentMission().type !== type) return;
+  const m = currentMission();
+  addScore(m.bonus);
+  showBanner(`MISSION COMPLETE +${m.bonus.toLocaleString()}`);
+  Sfx.mission();
+  game.missionIndex++;
+  game.compilerMissionHits = 0;
+  updateMissionHud();
+}
+
+function updateMissionHud() {
+  if (missionTextEl) missionTextEl.textContent = currentMission().text;
+}
+
+function isTilted() {
+  return performance.now() < game.tiltedUntil;
+}
+
+// ---------- high scores (localStorage top-5) ----------
+const HS_KEY = 'neonRiftHighScores';
+function loadHighScores() {
+  try {
+    const raw = localStorage.getItem(HS_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.filter((n) => Number.isFinite(n)).slice(0, 5) : [];
+  } catch (e) {
+    return [];
+  }
+}
+function saveHighScore(score) {
+  const list = loadHighScores();
+  const isNew = list.length < 5 || score > list[list.length - 1];
+  list.push(score);
+  list.sort((a, b) => b - a);
+  const top = list.slice(0, 5);
+  try {
+    localStorage.setItem(HS_KEY, JSON.stringify(top));
+  } catch (e) {}
+  return isNew && score > 0;
+}
+function renderHighScores(highlightScore) {
+  if (!hsListEl) return;
+  const list = loadHighScores();
+  if (list.length === 0) {
+    hsListEl.innerHTML = '<li><span class="hs-rank">—</span><span>no scores yet</span></li>';
+    return;
+  }
+  let highlighted = false;
+  hsListEl.innerHTML = list
+    .map((s, i) => {
+      const mine = !highlighted && s === highlightScore;
+      if (mine) highlighted = true;
+      return `<li class="${mine ? 'you' : ''}"><span class="hs-rank">${i + 1}</span><span>${s.toLocaleString()}</span></li>`;
+    })
+    .join('');
+}
 
 function currentMultiplier() {
   const overload = performance.now() < game.overloadUntil ? 2 : 1;
@@ -465,13 +690,10 @@ function addScore(base) {
   scoreEl.textContent = game.score.toLocaleString();
 }
 
+let laneBall = null;
 function resetBallToLane() {
-  ball.x = PLUNGER.x;
-  ball.y = PLUNGER.restY;
-  ball.vx = 0;
-  ball.vy = 0;
-  ball.mode = 'idle';
-  ball.stallTime = 0;
+  clearBalls();
+  laneBall = spawnBall(PLUNGER.x, PLUNGER.restY, 0, 0, 'idle');
   game.state = 'ready';
   showOverlay(false, false);
   showHint('Hold SPACE / LAUNCH to charge the plunger, release to fire');
@@ -492,6 +714,9 @@ const overlayTitleEl = document.querySelector('#overlay-panel h1');
 const startBtn = document.getElementById('start-btn');
 const hintEl = document.getElementById('hint');
 const overlayMsg = overlayMsgEl;
+const missionTextEl = document.getElementById('mission-text');
+const hsListEl = document.getElementById('hs-list');
+const muteBtn = document.getElementById('mute-btn');
 
 function showOverlay(show, isMenu) {
   overlayEl.classList.toggle('hidden', !show);
@@ -522,6 +747,9 @@ function updateHud() {
 
   const flags = [];
   const now = performance.now();
+  if (isTilted()) flags.push(['overload', 'TILT!']);
+  if (balls.length > 1) flags.push(['warp', `MULTIBALL x${balls.length}`]);
+  if (now < game.ballSaveUntil && game.state === 'playing') flags.push(['slowmo', 'BALL SAVE']);
   if (now < game.overloadUntil) flags.push(['overload', 'OVERLOAD']);
   if (now < game.warpMultUntil) flags.push(['warp', 'WARP x3']);
   if (game.ghostBallReady) flags.push(['ghost', 'GHOST BALL']);
@@ -532,9 +760,53 @@ function updateHud() {
 // =====================================================================
 // INPUT
 // =====================================================================
+let musicStarted = false;
+function ensureAudio() {
+  unlockAudio();
+  if (!musicStarted) {
+    startMusic();
+    musicStarted = true;
+  }
+}
+
+function pressFlipper(f) {
+  if (isTilted()) return;
+  f.pressed = true;
+  Sfx.flipperPress();
+}
+
+// nudge the table: impulse to live balls + screen shake, building toward a TILT
+function nudge(dir) {
+  if (game.state !== 'playing' && game.state !== 'ready') return;
+  if (isTilted()) return;
+  for (const b of balls) {
+    if (b.mode === 'live') {
+      b.vx += dir * 7;
+      b.vy += 2.2;
+    }
+  }
+  addShake(0.35);
+  buzz(12);
+  Sfx.uiClick();
+  game.tiltMeter += 0.34;
+  if (game.tiltMeter >= 1) triggerTilt();
+}
+
+function triggerTilt() {
+  game.tiltedUntil = performance.now() + 2500;
+  game.tiltMeter = 0;
+  leftFlipper.pressed = false;
+  rightFlipper.pressed = false;
+  midFlipper.pressed = false;
+  showBanner('TILT!');
+  Sfx.tilt();
+  addShake(0.8);
+  buzz(120);
+}
+
 const keyState = {};
 window.addEventListener('keydown', (e) => {
-  unlockAudio();
+  ensureAudio();
   if (keyState[e.code]) return;
   keyState[e.code] = true;
   handleKeyDown(e.code);
@@ -545,9 +817,12 @@ window.addEventListener('keyup', (e) => {
 });
 
 function handleKeyDown(code) {
-  if (code === 'ArrowLeft' || code === 'KeyZ') { leftFlipper.pressed = true; Sfx.flipperPress(); }
-  if (code === 'ArrowRight' || code === 'Slash') { rightFlipper.pressed = true; Sfx.flipperPress(); }
-  if (code === 'KeyX') { midFlipper.pressed = true; Sfx.flipperPress(); }
+  if (code === 'ArrowLeft' || code === 'KeyZ') pressFlipper(leftFlipper);
+  if (code === 'ArrowRight' || code === 'Slash') pressFlipper(rightFlipper);
+  if (code === 'KeyX') pressFlipper(midFlipper);
+  if (code === 'KeyC') nudge(-1);
+  if (code === 'KeyM') nudge(1);
+  if (code === 'KeyS') setMute(toggleMute());
   if (code === 'Space') {
     if (game.state === 'ready') {
       game.charging = true;
@@ -567,16 +842,34 @@ function handleKeyUp(code) {
   }
 }
 
+function setMute(muted) {
+  muteBtn.classList.toggle('muted', muted);
+  muteBtn.textContent = muted ? '✕' : '♪';
+}
+muteBtn.addEventListener('click', () => {
+  ensureAudio();
+  setMute(toggleMute());
+});
+
 function launchBall() {
   game.charging = false;
+  if (!laneBall || !laneBall.active) return;
   const t = clamp(game.plungerCharge / 900, 0, 1);
   const power = PLUNGER.minPower + (PLUNGER.maxPower - PLUNGER.minPower) * t;
-  ball.vy = power;
-  ball.vx = (Math.random() - 0.5) * 0.6;
-  ball.mode = 'live';
+  laneBall.vy = power;
+  laneBall.vx = (Math.random() - 0.5) * 0.6;
+  laneBall.mode = 'live';
   game.state = 'playing';
+  game.ballSaveUntil = performance.now() + BALL_SAVE_MS;
   showHint(null);
   Sfx.launch();
+  // skill shot: a perfectly-judged plunge in the sweet-spot band
+  if (t >= 0.8 && t <= 0.95) {
+    addScore(5000);
+    showBanner('SKILL SHOT! +5,000');
+    Sfx.skillShot();
+  }
+  laneBall = null;
 }
 
 function togglePause() {
@@ -592,7 +885,7 @@ function togglePause() {
 }
 
 startBtn.addEventListener('click', () => {
-  unlockAudio();
+  ensureAudio();
   Sfx.uiClick();
   startGame();
 });
@@ -600,7 +893,7 @@ startBtn.addEventListener('click', () => {
 // touch controls
 function bindTouch(id, onDown, onUp) {
   const el = document.getElementById(id);
-  const down = (e) => { e.preventDefault(); unlockAudio(); onDown(); };
+  const down = (e) => { e.preventDefault(); ensureAudio(); onDown(); };
   const up = (e) => { e.preventDefault(); onUp(); };
   el.addEventListener('touchstart', down, { passive: false });
   el.addEventListener('touchend', up, { passive: false });
@@ -608,8 +901,8 @@ function bindTouch(id, onDown, onUp) {
   el.addEventListener('mouseup', up);
   el.addEventListener('mouseleave', up);
 }
-bindTouch('t-left', () => { leftFlipper.pressed = true; Sfx.flipperPress(); }, () => (leftFlipper.pressed = false));
-bindTouch('t-right', () => { rightFlipper.pressed = true; Sfx.flipperPress(); }, () => (rightFlipper.pressed = false));
+bindTouch('t-left', () => pressFlipper(leftFlipper), () => (leftFlipper.pressed = false));
+bindTouch('t-right', () => pressFlipper(rightFlipper), () => (rightFlipper.pressed = false));
 bindTouch(
   't-launch',
   () => {
@@ -636,11 +929,19 @@ function startGame() {
   game.ghostBallReady = false;
   game.chainStreak = 0;
   game.chainStreakUntil = 0;
+  game.ballSaveUntil = 0;
+  game.tiltMeter = 0;
+  game.tiltedUntil = 0;
+  game.missionIndex = 0;
+  game.compilerMissionHits = 0;
+  game.firstNodeTime = 0;
+  game.isNewHighScore = false;
   for (const n of dataNodes) {
     n.lit = false;
     n.mesh.material = nodeMat(false);
   }
   scoreEl.textContent = '0';
+  updateMissionHud();
   resetBallToLane();
 }
 
@@ -652,67 +953,91 @@ function stepPhysics(dt) {
   rightFlipper.update(dt);
   midFlipper.update(dt);
 
-  if (ball.mode !== 'live') return;
+  updateFirewallState(dt);
 
-  ball.vy += GRAVITY * dt;
-  ball.x += ball.vx * dt;
-  ball.y += ball.vy * dt;
+  const anyFlipperPressed = leftFlipper.pressed || rightFlipper.pressed || midFlipper.pressed;
+
+  // iterate a snapshot since draining despawns balls mid-loop
+  for (const b of [...balls]) {
+    if (b.mode !== 'live') continue;
+    stepOneBall(b, dt, anyFlipperPressed);
+  }
+}
+
+function stepOneBall(b, dt, anyFlipperPressed) {
+  b.vy += GRAVITY * dt;
+  b.x += b.vx * dt;
+  b.y += b.vy * dt;
 
   // speed cap to keep collisions stable
-  const speed = len(ball.vx, ball.vy);
+  const speed = len(b.vx, b.vy);
   const MAX_SPEED = 75;
   if (speed > MAX_SPEED) {
-    ball.vx = (ball.vx / speed) * MAX_SPEED;
-    ball.vy = (ball.vy / speed) * MAX_SPEED;
+    b.vx = (b.vx / speed) * MAX_SPEED;
+    b.vy = (b.vy / speed) * MAX_SPEED;
   }
 
   for (const s of boundarySegs) {
-    if (collideBallSegment(ball, s.a[0], s.a[1], s.b[0], s.b[1], s.r, s.restitution)) Sfx.wall();
+    if (collideBallSegment(b, s.a[0], s.a[1], s.b[0], s.b[1], s.r, s.restitution)) Sfx.wall();
   }
 
-  if (leftFlipper.collide(ball, 0.55)) Sfx.flipperHit();
-  if (rightFlipper.collide(ball, 0.55)) Sfx.flipperHit();
-  if (midFlipper.collide(ball, 0.55)) Sfx.flipperHit();
+  if (leftFlipper.collide(b, 0.55)) { Sfx.flipperHit(); buzz(12); }
+  if (rightFlipper.collide(b, 0.55)) { Sfx.flipperHit(); buzz(12); }
+  if (midFlipper.collide(b, 0.55)) { Sfx.flipperHit(); buzz(12); }
 
   // anti-stall: the two main flippers' rest-position capsules overlap slightly
   // across the centerline, so an abandoned ball can settle motionless right on
   // that seam, sealed off from both the drain and the field. If nobody is
   // flipping and the ball goes dead for a few seconds, route it through the
   // normal drain check below rather than let the game appear frozen forever.
-  const anyFlipperPressed = leftFlipper.pressed || rightFlipper.pressed || midFlipper.pressed;
-  if (!anyFlipperPressed && len(ball.vx, ball.vy) < 1.2) {
-    ball.stallTime += dt;
-    if (ball.stallTime > 2.5) {
-      ball.stallTime = 0;
-      ball.y = -3;
+  if (!anyFlipperPressed && len(b.vx, b.vy) < 1.2) {
+    b.stallTime += dt;
+    if (b.stallTime > 2.5) {
+      b.stallTime = 0;
+      b.y = -3;
     }
   } else {
-    ball.stallTime = 0;
+    b.stallTime = 0;
   }
 
   // compiler bumper banks (static twin clusters)
   let compilerHit = false;
-  for (const b of COMPILER.bumpers) {
-    const cx = COMPILER.x + b.dx;
-    const cy = COMPILER.y + b.dy;
-    if (collideBallCircle(ball, cx, cy, b.r, COMPILER.restitution)) compilerHit = true;
+  for (const bm of COMPILER.bumpers) {
+    const cx = COMPILER.x + bm.dx;
+    const cy = COMPILER.y + bm.dy;
+    if (collideBallCircle(b, cx, cy, bm.r, COMPILER.restitution)) {
+      compilerHit = true;
+      worldBurst(cx, cy, 0xff2ad1, 8, 8);
+    }
   }
-  if (compilerHit) { onCompilerHit(); Sfx.bumper(); }
+  if (compilerHit) { onCompilerHit(); Sfx.bumper(); addShake(0.22); buzz(18); }
 
   // data nodes
   for (const n of dataNodes) {
-    if (collideBallCircle(ball, n.x, n.y, n.r, 0.65)) onDataNodeHit(n);
+    if (collideBallCircle(b, n.x, n.y, n.r, 0.65)) onDataNodeHit(n);
   }
 
-  // firewall gate
-  handleFirewall(dt);
+  // central rift scoring lane: reward crossing the centerline at speed
+  b.riftCd = Math.max(0, b.riftCd - dt);
+  if (b.riftCd <= 0 && b.lastX * b.x < 0 && b.y > RIFT.yMin && b.y < RIFT.yMax) {
+    if (len(b.vx, b.vy) > RIFT.minSpeed) {
+      addScore(500);
+      Sfx.rift();
+      worldBurst(0, b.y, 0xb14bff, 6, 7);
+      b.riftCd = 0.4;
+    }
+  }
+  b.lastX = b.x;
+
+  // firewall gate collision (gap state already advanced this step)
+  collideFirewall(b);
 
   // warp ramp zone
-  handleWarpRamp();
+  handleWarpRamp(b);
 
   // drain check
-  if (ball.y < -2.4) {
-    onDrain();
+  if (b.y < -2.4) {
+    onDrain(b);
   }
 }
 
@@ -725,9 +1050,15 @@ function onCompilerHit() {
     game.chainStreak = 1;
   }
   game.chainStreakUntil = now + 1300;
+  if (game.chainStreak >= 2) {
+    showBanner(`COMBO x${game.chainStreak}!`, 900);
+  }
   if (game.chainStreak === 3) {
     grantSlowMo();
   }
+  // mission progress: hit the compiler five times
+  game.compilerMissionHits++;
+  if (game.compilerMissionHits >= 5) completeMission('compiler');
 }
 
 function onDataNodeHit(node) {
@@ -740,8 +1071,16 @@ function onDataNodeHit(node) {
   node.mesh.material = nodeMat(true);
   addScore(1000);
   Sfx.dataNode();
+  worldBurst(node.x, node.y, 0xfffb6d, 7, 7);
+  if (game.litNodes === 0) game.firstNodeTime = performance.now();
   game.litNodes++;
   if (game.litNodes >= dataNodes.length) {
+    // fast clear bonus: all nodes lit within 8 seconds
+    if (performance.now() - game.firstNodeTime < 8000) {
+      addScore(3000);
+      showBanner('NODE RUSH! +3,000');
+    }
+    completeMission('nodes');
     triggerOverload();
   }
 }
@@ -751,6 +1090,8 @@ function triggerOverload() {
   game.ghostBallReady = true;
   showBanner('OVERLOAD MODE!');
   Sfx.overload();
+  addShake(0.5);
+  startMultiball();
   setTimeout(() => {
     for (const n of dataNodes) {
       n.lit = false;
@@ -760,6 +1101,26 @@ function triggerOverload() {
   }, 1200);
 }
 
+// Spawn extra balls from the compiler area, up to MAX_BALLS, for a multiball frenzy.
+function startMultiball() {
+  if (balls.length > 1) return; // already in multiball
+  const origin = primaryBall() || balls[0];
+  const ox = origin ? origin.x : COMPILER.x;
+  const oy = origin ? origin.y : COMPILER.y;
+  let spawned = 0;
+  while (balls.length < MAX_BALLS) {
+    const ang = Math.random() * Math.PI - Math.PI / 2; // upward-ish fan
+    const sp = 16 + Math.random() * 8;
+    if (!spawnBall(ox, oy, Math.sin(ang) * sp, Math.cos(ang) * sp + 6, 'live')) break;
+    spawned++;
+  }
+  if (spawned > 0) {
+    showBanner('MULTIBALL!');
+    Sfx.multiball();
+    worldBurst(ox, oy, 0x6dfcff, 16, 12);
+  }
+}
+
 let slowMoUntil = 0;
 function grantSlowMo() {
   slowMoUntil = performance.now() + 3500;
@@ -767,113 +1128,170 @@ function grantSlowMo() {
   Sfx.slowMo();
 }
 
-function handleFirewall(dt) {
+// Advance the firewall gate position/cooldown and its visuals once per step.
+const firewallGap = { min: 0, max: 0, center: 0 };
+function updateFirewallState(dt) {
   game.firewallCooldown = Math.max(0, game.firewallCooldown - dt);
   const t = performance.now() / 1000;
   const gateCenterX = Math.sin((t / FIREWALL.periodSec) * Math.PI * 2) * FIREWALL.slideRange;
-  const gapMin = gateCenterX - FIREWALL.gapHalfWidth;
-  const gapMax = gateCenterX + FIREWALL.gapHalfWidth;
+  firewallGap.center = gateCenterX;
+  firewallGap.min = gateCenterX - FIREWALL.gapHalfWidth;
+  firewallGap.max = gateCenterX + FIREWALL.gapHalfWidth;
 
-  const inGap = ball.x > gapMin && ball.x < gapMax;
-  const nearLine = Math.abs(ball.y - FIREWALL.y) < 0.6;
-
-  if (nearLine && inGap && ball.vy > 0 && game.firewallCooldown <= 0) {
-    addScore(5000);
-    game.firewallCooldown = 1.2;
-    showBanner('FIREWALL JACKPOT!');
-    Sfx.firewallJackpot();
-  } else if (nearLine && !inGap) {
-    // solid portion: collide as two segments
-    let hit;
-    if (ball.x <= gapMin) {
-      hit = collideBallSegment(ball, -FIREWALL.halfSpan, FIREWALL.y, gapMin, FIREWALL.y, FIREWALL.wallR, FIREWALL.restitution);
-    } else {
-      hit = collideBallSegment(ball, gapMax, FIREWALL.y, FIREWALL.halfSpan, FIREWALL.y, FIREWALL.wallR, FIREWALL.restitution);
-    }
-    if (hit) Sfx.wall();
-  }
-
-  // update visuals
-  firewallLeftMesh.scale.x = Math.max((gapMin - -FIREWALL.halfSpan), 0.1);
-  firewallLeftMesh.position.set(toWorldX((-FIREWALL.halfSpan + gapMin) / 2), 1.1, toWorldZ(FIREWALL.y));
-  firewallRightMesh.scale.x = Math.max((FIREWALL.halfSpan - gapMax), 0.1);
-  firewallRightMesh.position.set(toWorldX((gapMax + FIREWALL.halfSpan) / 2), 1.1, toWorldZ(FIREWALL.y));
+  firewallLeftMesh.scale.x = Math.max((firewallGap.min - -FIREWALL.halfSpan), 0.1);
+  firewallLeftMesh.position.set(toWorldX((-FIREWALL.halfSpan + firewallGap.min) / 2), 1.1, toWorldZ(FIREWALL.y));
+  firewallRightMesh.scale.x = Math.max((FIREWALL.halfSpan - firewallGap.max), 0.1);
+  firewallRightMesh.position.set(toWorldX((firewallGap.max + FIREWALL.halfSpan) / 2), 1.1, toWorldZ(FIREWALL.y));
   gapIndicator.scale.x = FIREWALL.gapHalfWidth * 2;
   gapIndicator.position.set(toWorldX(gateCenterX), 0.05, toWorldZ(FIREWALL.y));
 }
 
-let warping = false;
-let warpStartTime = 0;
+function collideFirewall(b) {
+  const { min: gapMin, max: gapMax } = firewallGap;
+  const inGap = b.x > gapMin && b.x < gapMax;
+  const nearLine = Math.abs(b.y - FIREWALL.y) < 0.6;
+
+  if (nearLine && inGap && b.vy > 0 && game.firewallCooldown <= 0) {
+    addScore(5000);
+    game.firewallCooldown = 1.2;
+    showBanner('FIREWALL JACKPOT!');
+    Sfx.firewallJackpot();
+    addShake(0.6);
+    buzz(30);
+    worldBurst(b.x, FIREWALL.y, 0xff2a2a, 14, 11);
+    completeMission('firewall');
+  } else if (nearLine && !inGap) {
+    // solid portion: collide as two segments
+    let hit;
+    if (b.x <= gapMin) {
+      hit = collideBallSegment(b, -FIREWALL.halfSpan, FIREWALL.y, gapMin, FIREWALL.y, FIREWALL.wallR, FIREWALL.restitution);
+    } else {
+      hit = collideBallSegment(b, gapMax, FIREWALL.y, FIREWALL.halfSpan, FIREWALL.y, FIREWALL.wallR, FIREWALL.restitution);
+    }
+    if (hit) Sfx.wall();
+  }
+}
+
 const WARP_DURATION = 1000;
-function handleWarpRamp() {
-  if (warping) return;
+function handleWarpRamp(b) {
+  if (b.mode !== 'live') return;
   const z = WARP_RAMP.zone;
-  if (ball.x > z.xMin && ball.x < z.xMax && ball.y > z.yMin && ball.y < z.yMax) {
-    const speed = len(ball.vx, ball.vy);
-    if (speed > WARP_RAMP.minSpeed && (!WARP_RAMP.requireAscending || ball.vy > 0)) {
-      startWarp();
+  if (b.x > z.xMin && b.x < z.xMax && b.y > z.yMin && b.y < z.yMax) {
+    const speed = len(b.vx, b.vy);
+    if (speed > WARP_RAMP.minSpeed && (!WARP_RAMP.requireAscending || b.vy > 0)) {
+      startWarp(b);
     }
   }
 }
 
-function startWarp() {
-  warping = true;
-  warpStartTime = performance.now();
-  ball.mode = 'warping';
+function startWarp(b) {
+  b.mode = 'warping';
+  b.warpStart = performance.now();
   addScore(3000);
   showBanner('WARP RAMP — 3x MULTIPLIER');
   Sfx.warpRamp();
+  completeMission('warp');
 }
 
 function updateWarp() {
-  if (!warping) return;
-  const t = clamp((performance.now() - warpStartTime) / WARP_DURATION, 0, 1);
-  // scripted loop near the ring, purely cosmetic, then drop back into the field
-  const loopX = WARP_RAMP.ringWorld.x + Math.sin(t * Math.PI * 2) * 1.4;
-  const loopY = 36 + t * 8;
-  ballMesh.position.set(loopX, 4 + Math.sin(t * Math.PI) * 4, toWorldZ(loopY));
-  if (t >= 1) {
-    warping = false;
-    ball.mode = 'live';
-    ball.x = WARP_RAMP.zone.xMin - 1.5;
-    ball.y = 40;
-    ball.vx = -(Math.random() * 3 + 2);
-    ball.vy = -16;
-    game.warpMultUntil = performance.now() + 15000;
+  for (const b of balls) {
+    if (b.mode !== 'warping') continue;
+    const t = clamp((performance.now() - b.warpStart) / WARP_DURATION, 0, 1);
+    // scripted loop near the ring, purely cosmetic, then drop back into the field
+    const loopX = WARP_RAMP.ringWorld.x + Math.sin(t * Math.PI * 2) * 1.4;
+    const loopY = 36 + t * 8;
+    b.mesh.position.set(loopX, 4 + Math.sin(t * Math.PI) * 4, toWorldZ(loopY));
+    if (t >= 1) {
+      b.mode = 'live';
+      b.x = WARP_RAMP.zone.xMin - 1.5;
+      b.y = 40;
+      b.vx = -(Math.random() * 3 + 2);
+      b.vy = -16;
+      b.lastX = b.x;
+      game.warpMultUntil = performance.now() + 15000;
+    }
   }
 }
 
-function onDrain() {
-  if (game.ghostBallReady) {
+function onDrain(b) {
+  // ball-save grace window: routine save while the timer is live
+  if (performance.now() < game.ballSaveUntil) {
+    b.y = 6;
+    b.vy = Math.abs(b.vy) * 0.6 + 14;
+    b.vx = (Math.random() - 0.5) * 4;
+    showBanner('BALL SAVED');
+    Sfx.ghostBallSave();
+    return;
+  }
+  // ghost ball: one-shot save earned from Overload
+  if (game.ghostBallReady && balls.length === 1) {
     game.ghostBallReady = false;
-    ball.y = 6;
-    ball.vy = Math.abs(ball.vy) * 0.6 + 14;
+    b.y = 6;
+    b.vy = Math.abs(b.vy) * 0.6 + 14;
     showBanner('GHOST BALL SAVE');
     Sfx.ghostBallSave();
     return;
   }
+
   Sfx.drain();
+  worldBurst(b.x, 0, 0x6dfcff, 10, 9);
+  despawnBall(b);
+
+  // in multiball, losing one ball just removes it — no life lost while others live
+  if (balls.length > 0) {
+    addShake(0.25);
+    return;
+  }
+
+  // last ball drained: lose a life
+  addShake(0.4);
+  buzz(60);
   game.balls--;
-  ball.mode = 'idle';
   if (game.balls <= 0) {
-    game.state = 'gameover';
-    showHint(null);
-    overlayTitleEl.textContent = 'GAME OVER';
-    overlayMsg.textContent = `Final score ${game.score.toLocaleString()} — press SPACE / START to play again`;
-    showOverlay(true, true);
-    Sfx.gameOver();
+    endGame();
   } else {
     showBanner(`BALL ${3 - game.balls + 1}`, 1200);
     resetBallToLane();
   }
 }
 
+function endGame() {
+  game.state = 'gameover';
+  showHint(null);
+  const isNew = saveHighScore(game.score);
+  game.isNewHighScore = isNew;
+  overlayTitleEl.textContent = isNew ? 'NEW HIGH SCORE!' : 'GAME OVER';
+  overlayMsg.textContent = `Final score ${game.score.toLocaleString()} — press SPACE / START to play again`;
+  renderHighScores(game.score);
+  showOverlay(true, true);
+  Sfx.gameOver();
+}
+
 // =====================================================================
 // RENDER / MAIN LOOP
 // =====================================================================
 function syncVisuals() {
-  if (!warping) {
-    ballMesh.position.set(toWorldX(ball.x), BALL_RADIUS, toWorldZ(ball.y));
+  // position each active ball (warping balls are placed by updateWarp)
+  for (const b of balls) {
+    if (b.mode !== 'warping') {
+      b.mesh.position.set(toWorldX(b.x), BALL_RADIUS, toWorldZ(b.y));
+    }
+    // per-ball neon trail
+    if (b.mode === 'live') {
+      b.trailHistory.unshift({ x: b.mesh.position.x, y: b.mesh.position.y, z: b.mesh.position.z });
+      if (b.trailHistory.length > TRAIL_LEN) b.trailHistory.pop();
+    } else {
+      b.trailHistory.length = 0;
+    }
+    for (let i = 0; i < TRAIL_LEN; i++) {
+      const p = b.trailHistory[i];
+      if (p) {
+        b.trailMeshes[i].visible = true;
+        b.trailMeshes[i].position.set(p.x, p.y, p.z);
+      } else {
+        b.trailMeshes[i].visible = false;
+      }
+    }
   }
 
   updateFlipperVisual(leftFlipper, leftFlipperMesh);
@@ -884,22 +1302,10 @@ function syncVisuals() {
   warpRing.rotation.z -= 0.01;
   starfield.rotation.y += 0.0006;
 
-  // trail
-  if (ball.mode === 'live') {
-    trailHistory.unshift({ x: ballMesh.position.x, y: ballMesh.position.y, z: ballMesh.position.z });
-    if (trailHistory.length > TRAIL_LEN) trailHistory.pop();
-  } else {
-    trailHistory.length = 0;
-  }
-  for (let i = 0; i < TRAIL_LEN; i++) {
-    const p = trailHistory[i];
-    if (p) {
-      trailMeshes[i].visible = true;
-      trailMeshes[i].position.set(p.x, p.y, p.z);
-    } else {
-      trailMeshes[i].visible = false;
-    }
-  }
+  // pulsing lightning rift
+  const pulse = 1.2 + Math.sin(performance.now() / 140) * 0.7;
+  riftMat.emissiveIntensity = pulse;
+  riftLight.intensity = 0.5 + pulse * 0.4;
 
   updateHud();
 }
@@ -927,12 +1333,18 @@ function frame(now) {
       accumulator -= FIXED_DT;
     }
     updateWarp();
+    // tilt meter cools off over time
+    game.tiltMeter = Math.max(0, game.tiltMeter - dt * 0.45);
   }
 
+  updateParticles(dt);
+  updateCamera();
   syncVisuals();
   renderer.render(scene, camera);
 }
 requestAnimationFrame(frame);
 
 // kick off in menu state
+renderHighScores();
+updateMissionHud();
 showOverlay(true, true);

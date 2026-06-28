@@ -33,7 +33,15 @@
         </div>
         <div id="status-flags" class="hud-block status-block"></div>
       </div>
+      <div class="hud-row">
+        <div id="mission" class="hud-block mission-block">
+          <span class="hud-label">Mission</span>
+          <span id="mission-text" class="hud-value">—</span>
+        </div>
+      </div>
     </div>
+
+    <button id="mute-btn" aria-label="Toggle sound">♪</button>
 
     <div id="banner"></div>
     <div id="hint"></div>
@@ -48,7 +56,12 @@
           <div><kbd>/</kbd> / <kbd>→</kbd> Right flipper</div>
           <div><kbd>X</kbd> Mid flipper</div>
           <div><kbd>Space</kbd> Plunger / Launch</div>
-          <div><kbd>P</kbd> Pause</div>
+          <div><kbd>C</kbd> / <kbd>M</kbd> Nudge left / right</div>
+          <div><kbd>P</kbd> Pause &nbsp; <kbd>S</kbd> Mute</div>
+        </div>
+        <div id="highscores">
+          <div class="hs-title">HIGH SCORES</div>
+          <ol id="hs-list"></ol>
         </div>
         <button id="start-btn">START</button>
       </div>

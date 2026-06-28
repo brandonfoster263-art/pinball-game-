@@ -4,12 +4,14 @@
 
 let ctx = null;
 let master = null;
+const MASTER_VOL = 0.45;
+let muted = false;
 
 function getCtx() {
   if (!ctx) {
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     master = ctx.createGain();
-    master.gain.value = 0.45;
+    master.gain.value = muted ? 0 : MASTER_VOL;
     master.connect(ctx.destination);
   }
   return ctx;
@@ -19,6 +21,16 @@ function getCtx() {
 export function unlockAudio() {
   const c = getCtx();
   if (c.state === 'suspended') c.resume();
+}
+
+// Mute affects both music and SFX (the whole master bus). Returns new state.
+export function toggleMute() {
+  muted = !muted;
+  if (master) master.gain.value = muted ? 0 : MASTER_VOL;
+  return muted;
+}
+export function isMuted() {
+  return muted;
 }
 
 function envGain(c, t0, peakGain, attack, dur) {
@@ -128,7 +140,100 @@ export const Sfx = {
   gameOver() {
     chime([392, 330, 262, 196], { dur: 0.22, gap: 0.18, type: 'sawtooth', gain: 0.3 });
   },
+  tilt() {
+    tone(90, { type: 'square', dur: 0.5, gain: 0.4, glideTo: 60 });
+    noiseBurst({ dur: 0.45, gain: 0.18, filterFreq: 400, filterType: 'lowpass' });
+  },
+  multiball() {
+    chime([523, 659, 784, 1046, 784, 1046, 1318], { dur: 0.12, gap: 0.06, type: 'square', gain: 0.32 });
+  },
+  skillShot() {
+    chime([1046, 1318, 1568, 2093], { dur: 0.1, gap: 0.05, type: 'triangle', gain: 0.34 });
+  },
+  rift() {
+    tone(1200, { type: 'sawtooth', dur: 0.14, gain: 0.22, glideTo: 400 });
+  },
+  mission() {
+    chime([784, 1046, 1318], { dur: 0.12, gap: 0.07, type: 'triangle', gain: 0.3 });
+  },
   uiClick() {
     tone(440, { type: 'square', dur: 0.05, gain: 0.2 });
   },
 };
+
+// =====================================================================
+// BACKGROUND MUSIC — a looping minor-key synth arpeggio over a low drone.
+// Built entirely from oscillators so there are still no audio assets.
+// =====================================================================
+let musicGain = null;
+let droneNodes = null;
+let musicTimer = null;
+let musicStep = 0;
+
+// Two bars of an A-minor-ish cyberpunk arpeggio (Hz). null = rest.
+const MUSIC_SEQ = [
+  220, 261.6, 329.6, 440, 329.6, 261.6, 220, 329.6,
+  196, 246.9, 329.6, 392, 329.6, 246.9, 196, 293.7,
+];
+const STEP_MS = 220;
+
+export function startMusic() {
+  const c = getCtx();
+  if (musicGain) return; // already running
+  musicGain = c.createGain();
+  musicGain.gain.value = 0.16;
+  musicGain.connect(master);
+
+  // continuous low drone (two detuned saws through a lowpass)
+  const droneGain = c.createGain();
+  droneGain.gain.value = 0.12;
+  const lp = c.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.value = 380;
+  droneGain.connect(lp);
+  lp.connect(musicGain);
+  const oscs = [55, 55.4, 82.4].map((f) => {
+    const o = c.createOscillator();
+    o.type = 'sawtooth';
+    o.frequency.value = f;
+    o.connect(droneGain);
+    o.start();
+    return o;
+  });
+  droneNodes = { oscs, droneGain };
+
+  musicStep = 0;
+  musicTimer = setInterval(() => {
+    const cc = getCtx();
+    const f = MUSIC_SEQ[musicStep % MUSIC_SEQ.length];
+    musicStep++;
+    if (!f) return;
+    const t0 = cc.currentTime;
+    const osc = cc.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.value = f;
+    const g = cc.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(0.5, t0 + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.3);
+    osc.connect(g);
+    g.connect(musicGain);
+    osc.start(t0);
+    osc.stop(t0 + 0.33);
+  }, STEP_MS);
+}
+
+export function stopMusic() {
+  if (musicTimer) {
+    clearInterval(musicTimer);
+    musicTimer = null;
+  }
+  if (droneNodes) {
+    droneNodes.oscs.forEach((o) => { try { o.stop(); } catch (e) {} });
+    droneNodes = null;
+  }
+  if (musicGain) {
+    try { musicGain.disconnect(); } catch (e) {}
+    musicGain = null;
+  }
+}
