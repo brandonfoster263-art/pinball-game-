@@ -127,6 +127,19 @@ export const WARP_RAMP = {
   ringWorld: { x: 8.4, y: 8, z: -38 },
 };
 
+// Top rollover lanes spelling R-I-F-T. Rolling the ball over a lane lights its
+// letter; completing RIFT awards a scaling bonus + an extra ball.
+export const ROLLOVERS = {
+  y: 44,
+  triggerR: 1.4, // proximity radius that counts as "rolling over" the lane
+  lanes: [
+    { x: -7.5, letter: 'R' },
+    { x: -2.5, letter: 'I' },
+    { x: 2.5, letter: 'F' },
+    { x: 7.5, letter: 'T' },
+  ],
+};
+
 export const PORTAL_RING = { x: 0, y: 49, z: 0 };
 
 export const DRAIN_GAP = { xMin: -7, xMax: 7 };

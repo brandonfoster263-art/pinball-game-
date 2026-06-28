@@ -13,6 +13,7 @@ import {
   FIREWALL,
   WARP_RAMP,
   PORTAL_RING,
+  ROLLOVERS,
 } from './layout.js';
 
 // ---------- table-space <-> world-space mapping ----------
@@ -366,11 +367,11 @@ const dataNodes = DATA_NODES.map((n) => {
 const compilerGroup = new THREE.Group();
 compilerGroup.position.set(toWorldX(COMPILER.x), 1.0, toWorldZ(COMPILER.y));
 scene.add(compilerGroup);
-const compilerRingColors = [0x6dfcff, 0xff2ad1, 0xb14bff];
-const compilerBumperMeshes = COMPILER.bumpers.map((b, i) => {
-  const color = compilerRingColors[i % compilerRingColors.length];
-  const capMat = new THREE.MeshStandardMaterial({ color: 0x0c0818, emissive: color, emissiveIntensity: 0.55, metalness: 0.6, roughness: 0.25 });
-  const ringMat = new THREE.MeshStandardMaterial({ color: 0x050308, emissive: color, emissiveIntensity: 2.4, metalness: 0.4, roughness: 0.2 });
+// Level colors: bumpers brighten / shift hue as they level up (x1 -> x2 -> x3).
+const compilerLevelColors = [0x6dfcff, 0xffb14b, 0xff2ad1];
+const compilerBumpers = COMPILER.bumpers.map((b) => {
+  const capMat = new THREE.MeshStandardMaterial({ color: 0x0c0818, emissive: compilerLevelColors[0], emissiveIntensity: 0.55, metalness: 0.6, roughness: 0.25 });
+  const ringMat = new THREE.MeshStandardMaterial({ color: 0x050308, emissive: compilerLevelColors[0], emissiveIntensity: 2.4, metalness: 0.4, roughness: 0.2 });
   const group = new THREE.Group();
   const cap = new THREE.Mesh(new THREE.CylinderGeometry(b.r * 0.82, b.r * 0.82, 1.0, 16), capMat);
   group.add(cap);
@@ -380,8 +381,50 @@ const compilerBumperMeshes = COMPILER.bumpers.map((b, i) => {
   group.add(ring);
   group.position.set(b.dx, 0, -b.dy);
   compilerGroup.add(group);
-  return group;
+  // progressive-value state: hits accumulate to raise the bumper's level (1..3)
+  return { group, cap, ring, capMat, ringMat, hits: 0, level: 1, pulse: 0 };
 });
+
+function bumperLevelFor(hits) {
+  return Math.min(3, 1 + Math.floor(hits / 6));
+}
+
+function applyBumperLevel(bm) {
+  const color = compilerLevelColors[bm.level - 1];
+  bm.capMat.emissive.setHex(color);
+  bm.ringMat.emissive.setHex(color);
+  bm.capMat.emissiveIntensity = 0.55 + (bm.level - 1) * 0.5;
+  bm.ringMat.emissiveIntensity = 2.4 + (bm.level - 1) * 1.2;
+}
+
+// ---------- top rollover lanes (R-I-F-T) ----------
+const rolloverMeshes = ROLLOVERS.lanes.map((lane) => {
+  const group = new THREE.Group();
+  // flat lane gate marker lying on the playfield
+  const ringMat = new THREE.MeshStandardMaterial({ color: 0x07121c, emissive: 0x6dfcff, emissiveIntensity: 0.5, metalness: 0.4, roughness: 0.3 });
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.95, 0.13, 8, 22), ringMat);
+  ring.rotation.x = -Math.PI / 2;
+  group.add(ring);
+  // a little wire arch the ball rolls under
+  const archMat = new THREE.MeshStandardMaterial({ color: 0x0a1822, emissive: 0x6dfcff, emissiveIntensity: 0.5, metalness: 0.5, roughness: 0.25 });
+  const arch = new THREE.Mesh(new THREE.TorusGeometry(0.95, 0.07, 8, 22, Math.PI), archMat);
+  arch.position.y = 0.05;
+  group.add(arch);
+  group.position.set(toWorldX(lane.x), 0.12, toWorldZ(ROLLOVERS.y));
+  scene.add(group);
+  return { ringMat, archMat };
+});
+const rolloverLit = ROLLOVERS.lanes.map(() => false);
+let riftLevel = 1;
+
+function setRolloverGlow(i, lit) {
+  const m = rolloverMeshes[i];
+  const intensity = lit ? 2.6 : 0.5;
+  m.ringMat.emissiveIntensity = intensity;
+  m.archMat.emissiveIntensity = intensity;
+  m.ringMat.emissive.setHex(lit ? 0xfffb6d : 0x6dfcff);
+  m.archMat.emissive.setHex(lit ? 0xfffb6d : 0x6dfcff);
+}
 
 // ---------- firewall gate ----------
 const firewallGroup = new THREE.Group();
@@ -715,8 +758,16 @@ const startBtn = document.getElementById('start-btn');
 const hintEl = document.getElementById('hint');
 const overlayMsg = overlayMsgEl;
 const missionTextEl = document.getElementById('mission-text');
+const lanesPipsEl = document.getElementById('lanes-pips');
 const hsListEl = document.getElementById('hs-list');
 const muteBtn = document.getElementById('mute-btn');
+
+function updateLanesHud() {
+  if (!lanesPipsEl) return;
+  lanesPipsEl.innerHTML = ROLLOVERS.lanes
+    .map((lane, i) => `<span class="${rolloverLit[i] ? 'lane-on' : 'lane-off'}">${lane.letter}</span>`)
+    .join(' ');
+}
 
 function showOverlay(show, isMenu) {
   overlayEl.classList.toggle('hidden', !show);
@@ -940,8 +991,23 @@ function startGame() {
     n.lit = false;
     n.mesh.material = nodeMat(false);
   }
+  // reset rollover lanes
+  riftLevel = 1;
+  for (let i = 0; i < rolloverLit.length; i++) {
+    rolloverLit[i] = false;
+    setRolloverGlow(i, false);
+  }
+  // reset progressive bumper levels
+  for (const bm of compilerBumpers) {
+    bm.hits = 0;
+    bm.level = 1;
+    bm.pulse = 0;
+    bm.group.scale.setScalar(1);
+    applyBumperLevel(bm);
+  }
   scoreEl.textContent = '0';
   updateMissionHud();
+  updateLanesHud();
   resetBallToLane();
 }
 
@@ -1000,21 +1066,35 @@ function stepOneBall(b, dt, anyFlipperPressed) {
     b.stallTime = 0;
   }
 
-  // compiler bumper banks (static twin clusters)
-  let compilerHit = false;
-  for (const bm of COMPILER.bumpers) {
+  // compiler bumper banks (static twin clusters, progressive value)
+  for (let i = 0; i < COMPILER.bumpers.length; i++) {
+    const bm = COMPILER.bumpers[i];
     const cx = COMPILER.x + bm.dx;
     const cy = COMPILER.y + bm.dy;
     if (collideBallCircle(b, cx, cy, bm.r, COMPILER.restitution)) {
-      compilerHit = true;
-      worldBurst(cx, cy, 0xff2ad1, 8, 8);
+      onCompilerHit(i);
+      worldBurst(cx, cy, compilerLevelColors[compilerBumpers[i].level - 1], 8, 8);
+      Sfx.bumper();
+      addShake(0.22);
+      buzz(18);
+      break; // one bumper interaction per ball per step
     }
   }
-  if (compilerHit) { onCompilerHit(); Sfx.bumper(); addShake(0.22); buzz(18); }
 
   // data nodes
   for (const n of dataNodes) {
     if (collideBallCircle(b, n.x, n.y, n.r, 0.65)) onDataNodeHit(n);
+  }
+
+  // top rollover lanes (R-I-F-T): rolling over an unlit lane lights its letter
+  for (let i = 0; i < ROLLOVERS.lanes.length; i++) {
+    if (rolloverLit[i]) continue;
+    const lane = ROLLOVERS.lanes[i];
+    const dx = b.x - lane.x;
+    const dy = b.y - ROLLOVERS.y;
+    if (dx * dx + dy * dy < ROLLOVERS.triggerR * ROLLOVERS.triggerR) {
+      lightRollover(i);
+    }
   }
 
   // central rift scoring lane: reward crossing the centerline at speed
@@ -1041,8 +1121,19 @@ function stepOneBall(b, dt, anyFlipperPressed) {
   }
 }
 
-function onCompilerHit() {
-  addScore(150);
+function onCompilerHit(i) {
+  const bm = compilerBumpers[i];
+  bm.hits++;
+  const newLevel = bumperLevelFor(bm.hits);
+  if (newLevel !== bm.level) {
+    bm.level = newLevel;
+    applyBumperLevel(bm);
+    showBanner(`BUMPER LEVEL ${bm.level}!`, 800);
+  }
+  bm.pulse = 1; // visual kick, decayed in syncVisuals
+  // progressive value: a leveled bumper is worth more
+  addScore(150 * bm.level);
+
   const now = performance.now();
   if (now < game.chainStreakUntil) {
     game.chainStreak = Math.min(game.chainStreak + 1, 6);
@@ -1059,6 +1150,31 @@ function onCompilerHit() {
   // mission progress: hit the compiler five times
   game.compilerMissionHits++;
   if (game.compilerMissionHits >= 5) completeMission('compiler');
+}
+
+function lightRollover(i) {
+  rolloverLit[i] = true;
+  setRolloverGlow(i, true);
+  addScore(250);
+  Sfx.dataNodeRepeat();
+  updateLanesHud();
+  if (rolloverLit.every(Boolean)) completeRiftLanes();
+}
+
+function completeRiftLanes() {
+  const bonus = 5000 * riftLevel;
+  addScore(bonus);
+  game.balls++; // extra ball reward
+  showBanner(`RIFT LANES! EXTRA BALL +${bonus.toLocaleString()}`);
+  Sfx.skillShot();
+  addShake(0.5);
+  worldBurst(0, ROLLOVERS.y, 0xfffb6d, 18, 12);
+  riftLevel++;
+  for (let i = 0; i < rolloverLit.length; i++) {
+    rolloverLit[i] = false;
+    setRolloverGlow(i, false);
+  }
+  updateLanesHud();
 }
 
 function onDataNodeHit(node) {
@@ -1250,7 +1366,7 @@ function onDrain(b) {
   if (game.balls <= 0) {
     endGame();
   } else {
-    showBanner(`BALL ${3 - game.balls + 1}`, 1200);
+    showBanner(`${game.balls} BALL${game.balls === 1 ? '' : 'S'} LEFT`, 1200);
     resetBallToLane();
   }
 }
@@ -1307,6 +1423,14 @@ function syncVisuals() {
   riftMat.emissiveIntensity = pulse;
   riftLight.intensity = 0.5 + pulse * 0.4;
 
+  // bumper hit-pulse animation
+  for (const bm of compilerBumpers) {
+    if (bm.pulse > 0) {
+      bm.pulse = Math.max(0, bm.pulse - 0.06);
+      bm.group.scale.setScalar(1 + bm.pulse * 0.25);
+    }
+  }
+
   updateHud();
 }
 
@@ -1347,4 +1471,5 @@ requestAnimationFrame(frame);
 // kick off in menu state
 renderHighScores();
 updateMissionHud();
+updateLanesHud();
 showOverlay(true, true);

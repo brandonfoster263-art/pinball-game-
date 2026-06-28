@@ -82,6 +82,18 @@ html, body {
   letter-spacing: 0.08em;
 }
 
+.lanes-block .hud-value {
+  letter-spacing: 0.28em;
+  font-weight: bold;
+}
+.lanes-block .lane-on {
+  color: #6dfcff;
+  text-shadow: 0 0 8px #6dfcff, 0 0 2px #fff;
+}
+.lanes-block .lane-off {
+  color: #3a4a66;
+}
+
 #mute-btn {
   position: absolute;
   top: 12px;
