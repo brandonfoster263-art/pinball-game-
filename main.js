@@ -1,4 +1,8 @@
 import * as THREE from './vendor/three/three.module.min.js';
+import { EffectComposer } from './vendor/three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from './vendor/three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from './vendor/three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from './vendor/three/addons/postprocessing/OutputPass.js';
 import { Flipper, collideBallSegment, collideBallCircle, clamp, len } from './physics.js';
 import { Sfx, unlockAudio, toggleMute, isMuted, startMusic } from './audio.js';
 import {
@@ -23,7 +27,20 @@ const toWorldZ = (y) => -y;
 // ---------- renderer / scene / camera ----------
 const canvas = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+// bloom is too heavy without GPU acceleration — detect software GL and skip post-processing
+const softwareGL = (() => {
+  try {
+    const gl = renderer.getContext();
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    const name = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : '';
+    return /swiftshader|llvmpipe|software/i.test(name);
+  } catch {
+    return false;
+  }
+})();
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, softwareGL ? 2 : 1.75));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x040212);
 scene.fog = new THREE.FogExp2(0x050214, 0.006);
@@ -59,10 +76,27 @@ function updateCamera() {
 }
 placeCamera();
 
+// ---------- post-processing (bloom is what sells the neon) ----------
+let composer = null;
+if (!softwareGL) {
+  composer = new EffectComposer(
+    renderer,
+    // multisampled HalfFloat target: keeps MSAA edges and >1.0 emissive values for bloom
+    new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 })
+  );
+  composer.addPass(new RenderPass(scene, camera));
+  composer.addPass(new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.55, 0.4, 0.85));
+  composer.addPass(new OutputPass());
+}
+
 function resize() {
   const w = window.innerWidth;
   const h = window.innerHeight;
   renderer.setSize(w, h);
+  if (composer) {
+    composer.setPixelRatio(renderer.getPixelRatio());
+    composer.setSize(w, h);
+  }
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
 }
@@ -70,7 +104,7 @@ window.addEventListener('resize', resize);
 resize();
 
 // ---------- lighting ----------
-scene.add(new THREE.AmbientLight(0x2b2a55, 0.7));
+scene.add(new THREE.AmbientLight(0x2b2a55, 0.5));
 const keyLight = new THREE.PointLight(0x6df9ff, 1.4, 80, 2);
 keyLight.position.set(0, 22, toWorldZ(20));
 scene.add(keyLight);
@@ -78,10 +112,43 @@ const magentaLight = new THREE.PointLight(0xff2ad1, 1.1, 70, 2);
 magentaLight.position.set(0, 16, toWorldZ(40));
 scene.add(magentaLight);
 
+// ---------- neon environment map ----------
+// A tiny synthetic room of neon light panels, baked once through PMREM. This is
+// what makes the chrome ball and the metallic trim actually reflect the world's
+// cyan/magenta identity instead of looking flat.
+{
+  const envScene = new THREE.Scene();
+  const panel = (color, intensity, w, h) => {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(color).multiplyScalar(intensity), side: THREE.DoubleSide })
+    );
+    envScene.add(m);
+    return m;
+  };
+  const cyan = panel(0x36e0ff, 5, 14, 30);
+  cyan.position.set(-16, 8, 0);
+  cyan.rotation.y = Math.PI / 2;
+  const magenta = panel(0xff2ad1, 5, 14, 30);
+  magenta.position.set(16, 8, 0);
+  magenta.rotation.y = -Math.PI / 2;
+  const violet = panel(0x8a3dff, 3, 30, 30);
+  violet.position.set(0, 18, 0);
+  violet.rotation.x = Math.PI / 2;
+  const white = panel(0xffffff, 8, 5, 3);
+  white.position.set(0, 12, 14);
+  white.rotation.x = -0.5;
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(envScene, 0.06).texture;
+  pmrem.dispose();
+}
+
 // ---------- starfield void background ----------
 function buildStarfield() {
-  const count = 900;
+  const count = 1400;
   const positions = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+  const palette = [new THREE.Color(0x9be9ff), new THREE.Color(0xffffff), new THREE.Color(0xff9bea), new THREE.Color(0xb9a8ff)];
   for (let i = 0; i < count; i++) {
     const r = 90 + Math.random() * 140;
     const theta = Math.random() * Math.PI * 2;
@@ -89,10 +156,23 @@ function buildStarfield() {
     positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
     positions[i * 3 + 1] = Math.abs(r * Math.cos(phi)) * 0.6 + 5;
     positions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta) - 30;
+    const c = palette[(Math.random() * palette.length) | 0];
+    const twinkle = 0.5 + Math.random() * 0.5;
+    colors[i * 3] = c.r * twinkle;
+    colors[i * 3 + 1] = c.g * twinkle;
+    colors[i * 3 + 2] = c.b * twinkle;
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  const mat = new THREE.PointsMaterial({ color: 0x9be9ff, size: 0.6, transparent: true, opacity: 0.75 });
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const mat = new THREE.PointsMaterial({
+    size: 0.7,
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.9,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
   const points = new THREE.Points(geo, mat);
   scene.add(points);
   return points;
@@ -100,7 +180,39 @@ function buildStarfield() {
 const starfield = buildStarfield();
 
 // ---------- neon grid floor (cyberspace void) ----------
-const grid = new THREE.GridHelper(220, 44, 0xff2ad1, 0x1c1240);
+// Shader plane instead of GridHelper: anti-aliased lines that fade into the
+// fog, with a slow energy pulse rolling out from under the table.
+const gridUniforms = { uTime: { value: 0 } };
+const gridMat = new THREE.ShaderMaterial({
+  uniforms: gridUniforms,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: /* glsl */ `
+    varying vec3 vWorld;
+    void main() {
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWorld = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    varying vec3 vWorld;
+    uniform float uTime;
+    void main() {
+      vec2 cell = vWorld.xz / 5.0;
+      vec2 g = abs(fract(cell - 0.5) - 0.5) / fwidth(cell);
+      float line = 1.0 - min(min(g.x, g.y), 1.0);
+      float d = length(vWorld.xz);
+      float fade = exp(-d * 0.016);
+      float pulse = 0.55 + 0.45 * sin(d * 0.22 - uTime * 2.2);
+      vec3 color = mix(vec3(1.0, 0.16, 0.82), vec3(0.2, 0.9, 1.0), pulse);
+      float alpha = line * fade * (0.35 + 0.65 * pulse);
+      gl_FragColor = vec4(color * (0.6 + pulse), alpha);
+    }
+  `,
+});
+const grid = new THREE.Mesh(new THREE.PlaneGeometry(260, 260), gridMat);
+grid.rotation.x = -Math.PI / 2;
 grid.position.y = -6;
 scene.add(grid);
 
@@ -114,9 +226,10 @@ const bedMat = new THREE.MeshStandardMaterial({
   color: 0xffffff,
   emissiveMap: playfieldTexture,
   emissive: 0xffffff,
-  emissiveIntensity: 0.35,
-  metalness: 0.2,
-  roughness: 0.6,
+  emissiveIntensity: 0.3,
+  metalness: 0.5,
+  roughness: 0.35,
+  envMapIntensity: 0.6,
 });
 const bed = new THREE.Mesh(bedGeo, bedMat);
 bed.rotation.x = -Math.PI / 2;
@@ -263,9 +376,9 @@ scene.add(bed);
 const wallMat = new THREE.MeshStandardMaterial({
   color: 0x1a0a33,
   emissive: 0x6dfcff,
-  emissiveIntensity: 0.9,
-  metalness: 0.4,
-  roughness: 0.35,
+  emissiveIntensity: 0.45,
+  metalness: 0.7,
+  roughness: 0.22,
 });
 const wallGroup = new THREE.Group();
 scene.add(wallGroup);
@@ -301,15 +414,15 @@ for (const s of boundarySegs) {
 // Glassy white-cyan neon flippers, matching the reference cabinet's flipper finish.
 function makeFlipperVisual(cfg) {
   const bodyMat = new THREE.MeshStandardMaterial({
-    color: 0xeafdff,
-    emissive: 0x6dfcff,
-    emissiveIntensity: 0.55,
-    metalness: 0.2,
-    roughness: 0.15,
+    color: 0x10283a,
+    emissive: 0x2fc8e8,
+    emissiveIntensity: 0.7,
+    metalness: 0.75,
+    roughness: 0.2,
     transparent: true,
-    opacity: 0.82,
+    opacity: 0.92,
   });
-  const rimMat = new THREE.MeshStandardMaterial({ color: 0x0a1820, emissive: 0x6dfcff, emissiveIntensity: 2.2, metalness: 0.3, roughness: 0.2 });
+  const rimMat = new THREE.MeshStandardMaterial({ color: 0x0a1820, emissive: 0x6dfcff, emissiveIntensity: 1.4, metalness: 0.3, roughness: 0.2 });
 
   const bodyLen = Math.max(cfg.length - cfg.radius * 2, 0.2);
   const geo = new THREE.CapsuleGeometry(cfg.radius * 0.82, bodyLen, 4, 8);
@@ -349,7 +462,7 @@ const nodeMat = (lit) =>
   new THREE.MeshStandardMaterial({
     color: lit ? 0x33310a : 0x0a1a22,
     emissive: lit ? 0xfffb6d : 0x2fb8d6,
-    emissiveIntensity: lit ? 2.2 : 0.9,
+    emissiveIntensity: lit ? 2.2 : 0.55,
     metalness: 0.3,
     roughness: 0.3,
   });
@@ -371,7 +484,7 @@ scene.add(compilerGroup);
 const compilerLevelColors = [0x6dfcff, 0xffb14b, 0xff2ad1];
 const compilerBumpers = COMPILER.bumpers.map((b) => {
   const capMat = new THREE.MeshStandardMaterial({ color: 0x0c0818, emissive: compilerLevelColors[0], emissiveIntensity: 0.55, metalness: 0.6, roughness: 0.25 });
-  const ringMat = new THREE.MeshStandardMaterial({ color: 0x050308, emissive: compilerLevelColors[0], emissiveIntensity: 2.4, metalness: 0.4, roughness: 0.2 });
+  const ringMat = new THREE.MeshStandardMaterial({ color: 0x050308, emissive: compilerLevelColors[0], emissiveIntensity: 1.5, metalness: 0.4, roughness: 0.2 });
   const group = new THREE.Group();
   const cap = new THREE.Mesh(new THREE.CylinderGeometry(b.r * 0.82, b.r * 0.82, 1.0, 16), capMat);
   group.add(cap);
@@ -394,7 +507,7 @@ function applyBumperLevel(bm) {
   bm.capMat.emissive.setHex(color);
   bm.ringMat.emissive.setHex(color);
   bm.capMat.emissiveIntensity = 0.55 + (bm.level - 1) * 0.5;
-  bm.ringMat.emissiveIntensity = 2.4 + (bm.level - 1) * 1.2;
+  bm.ringMat.emissiveIntensity = 1.5 + (bm.level - 1) * 0.9;
 }
 
 // ---------- top rollover lanes (R-I-F-T) ----------
@@ -429,7 +542,7 @@ function setRolloverGlow(i, lit) {
 // ---------- firewall gate ----------
 const firewallGroup = new THREE.Group();
 scene.add(firewallGroup);
-const firewallMat = new THREE.MeshStandardMaterial({ color: 0x2a0a14, emissive: 0xff2a2a, emissiveIntensity: 1.3, metalness: 0.5, roughness: 0.3 });
+const firewallMat = new THREE.MeshStandardMaterial({ color: 0x2a0a14, emissive: 0xff3a2a, emissiveIntensity: 2.0, metalness: 0.5, roughness: 0.3, transparent: true, opacity: 0.9 });
 const firewallLeftMesh = new THREE.Mesh(new THREE.BoxGeometry(1, 2.2, 0.6), firewallMat);
 const firewallRightMesh = new THREE.Mesh(new THREE.BoxGeometry(1, 2.2, 0.6), firewallMat);
 firewallGroup.add(firewallLeftMesh, firewallRightMesh);
@@ -493,13 +606,16 @@ scene.add(riftLight);
 // ---------- ball pool (supports multiball) ----------
 const MAX_BALLS = 3;
 const TRAIL_LEN = 14;
-const ballGeo = new THREE.SphereGeometry(BALL_RADIUS, 20, 20);
+const ballGeo = new THREE.SphereGeometry(BALL_RADIUS, 32, 24);
+// chrome ball: the neon environment map does the work, emissive just keeps a
+// faint cyan core so it never reads as a black hole in dark corners
 const ballMat = new THREE.MeshStandardMaterial({
-  color: 0xeafdff,
-  emissive: 0x6dfcff,
-  emissiveIntensity: 1.4,
-  metalness: 0.7,
-  roughness: 0.15,
+  color: 0xffffff,
+  emissive: 0x2a6f85,
+  emissiveIntensity: 0.7,
+  metalness: 1.0,
+  roughness: 0.08,
+  envMapIntensity: 1.7,
 });
 
 function createBall() {
@@ -513,7 +629,13 @@ function createBall() {
   for (let i = 0; i < TRAIL_LEN; i++) {
     const m = new THREE.Mesh(
       new THREE.SphereGeometry(BALL_RADIUS * (1 - i / (TRAIL_LEN + 4)), 8, 8),
-      new THREE.MeshBasicMaterial({ color: 0x6dfcff, transparent: true, opacity: 0.32 * (1 - i / TRAIL_LEN) })
+      new THREE.MeshBasicMaterial({
+        color: 0x6dfcff,
+        transparent: true,
+        opacity: 0.32 * (1 - i / TRAIL_LEN),
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
     );
     m.visible = false;
     scene.add(m);
@@ -565,7 +687,7 @@ const particleGeo = new THREE.SphereGeometry(0.16, 6, 6);
 const particles = Array.from({ length: PARTICLE_COUNT }, () => {
   const mesh = new THREE.Mesh(
     particleGeo,
-    new THREE.MeshBasicMaterial({ color: 0x6dfcff, transparent: true, opacity: 1 })
+    new THREE.MeshBasicMaterial({ color: 0x6dfcff, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false })
   );
   mesh.visible = false;
   scene.add(mesh);
@@ -1425,6 +1547,7 @@ function syncVisuals() {
   portalRing.rotation.z += 0.004;
   warpRing.rotation.z -= 0.01;
   starfield.rotation.y += 0.0006;
+  gridUniforms.uTime.value = performance.now() / 1000;
 
   // pulsing lightning rift
   const pulse = 1.2 + Math.sin(performance.now() / 140) * 0.7;
@@ -1472,7 +1595,8 @@ function frame(now) {
   updateParticles(dt);
   updateCamera();
   syncVisuals();
-  renderer.render(scene, camera);
+  if (composer) composer.render();
+  else renderer.render(scene, camera);
 }
 requestAnimationFrame(frame);
 

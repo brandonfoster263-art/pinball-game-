@@ -29,6 +29,16 @@ html, body {
   height: 100%;
 }
 
+#fx-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse at 50% 42%, transparent 52%, rgba(2, 0, 14, 0.5) 100%),
+    repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.14) 0px, rgba(0, 0, 0, 0.14) 1px, transparent 1px, transparent 3px);
+}
+
 #hud {
   position: absolute;
   top: 0;
