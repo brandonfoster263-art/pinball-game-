@@ -15,16 +15,26 @@ export function buildBoundarySegments() {
   const wallR = 0.25;
   const wallRest = 0.55;
 
-  // left wall: vertical run, then funnel into the flipper pocket
+  // left wall: vertical run down to the outlane region
   segs.push({ a: [-TABLE_HALF_W, 46], b: [-TABLE_HALF_W, 12], r: wallR, restitution: wallRest });
-  segs.push({ a: [-TABLE_HALF_W, 12], b: [-7, 4], r: wallR, restitution: wallRest });
+  // left outlane outer guide: hugs the wall, ends above the open drain slot
+  segs.push({ a: [-TABLE_HALF_W, 12], b: [-11.0, 5.6], r: wallR, restitution: wallRest });
+  // left outlane/inlane divider (a raised lane guide with rounded post ends)
+  segs.push({ a: [OUTLANES.left.dividerTop[0], OUTLANES.left.dividerTop[1]], b: [OUTLANES.left.dividerBot[0], OUTLANES.left.dividerBot[1]], r: 0.3, restitution: wallRest });
+  // left inlane inner wall guiding into the flipper
+  segs.push({ a: [OUTLANES.left.dividerBot[0], OUTLANES.left.dividerBot[1]], b: [-7, 4], r: wallR, restitution: wallRest });
 
   // right wall (outer): vertical for the lane, continues up around the top
   segs.push({ a: [TABLE_HALF_W, -2], b: [TABLE_HALF_W, 46], r: wallR, restitution: wallRest });
 
-  // right inner field wall below the lane merge point, funnel into the right flipper pocket
+  // right inner field wall below the lane merge point, then the right outlane
   segs.push({ a: [LANE_INNER_X, LANE_OPEN_Y], b: [LANE_INNER_X, 12], r: wallR, restitution: wallRest });
-  segs.push({ a: [LANE_INNER_X, 12], b: [7, 4], r: wallR, restitution: wallRest });
+  // right outlane outer guide
+  segs.push({ a: [LANE_INNER_X, 12], b: [8.6, 5.6], r: wallR, restitution: wallRest });
+  // right outlane/inlane divider
+  segs.push({ a: [OUTLANES.right.dividerTop[0], OUTLANES.right.dividerTop[1]], b: [OUTLANES.right.dividerBot[0], OUTLANES.right.dividerBot[1]], r: 0.3, restitution: wallRest });
+  // right inlane inner wall guiding into the flipper
+  segs.push({ a: [OUTLANES.right.dividerBot[0], OUTLANES.right.dividerBot[1]], b: [7, 4], r: wallR, restitution: wallRest });
 
   // top arc, approximated with segments
   const arcSegments = 10;
@@ -44,6 +54,71 @@ export function buildBoundarySegments() {
 
   return segs;
 }
+
+// Outlane / inlane geometry (classic bottom-of-table lanes).
+// The divider is a raised guide rail: wall side of it = outlane (drains through
+// the open slot at its foot), field side = inlane (feeds the flipper).
+export const OUTLANES = {
+  left: {
+    dividerTop: [-10.0, 10.0],
+    dividerBot: [-8.6, 5.2],
+    // sensor zone that counts as "ball is in the outlane" (kickback territory)
+    zone: { xMin: -11.6, xMax: -8.8, yMin: 3.4, yMax: 5.4 },
+    kickback: { x: -9.9, y: 4.2 }, // kicker position at the foot of the outlane
+  },
+  right: {
+    dividerTop: [7.6, 10.0],
+    dividerBot: [6.9, 5.2],
+    zone: { xMin: 7.1, xMax: 9.2, yMin: 3.4, yMax: 5.4 },
+  },
+  // inlane sensor strips (rolling through one boosts the bonus multiplier)
+  inlaneZones: [
+    { xMin: -8.8, xMax: -7.0, yMin: 4.6, yMax: 6.2 },
+    { xMin: 6.9, xMax: 8.4, yMin: 4.6, yMax: 6.2 },
+  ],
+};
+
+// Slingshot kickers: triangles above each flipper. face = the kicking edge
+// (a -> b), kick direction is that edge's outward normal.
+export const SLINGSHOTS = [
+  {
+    verts: [[-6.1, 9.6], [-4.6, 6.6], [-7.1, 6.8]],
+    face: [[-6.1, 9.6], [-4.6, 6.6]],
+    kickSpeed: 19,
+    cooldownSec: 0.22,
+  },
+  {
+    verts: [[6.1, 9.6], [4.6, 6.6], [7.1, 6.8]],
+    face: [[4.6, 6.6], [6.1, 9.6]],
+    kickSpeed: 19,
+    cooldownSec: 0.22,
+  },
+];
+
+// Drop target bank on the left mid-field, spelling R-U-N. Each target is a
+// short wall segment that collapses when struck; completing the bank starts
+// the next hack mode and pops the targets back up.
+export const DROP_TARGETS = {
+  letters: ['R', 'U', 'N'],
+  resetDelaySec: 1.4,
+  targets: [
+    { a: [-8.2, 27.8], b: [-7.1, 27.2] },
+    { a: [-6.6, 26.9], b: [-5.5, 26.3] },
+    { a: [-5.0, 26.0], b: [-3.9, 25.4] },
+  ],
+  r: 0.28,
+  restitution: 0.7,
+};
+
+// Spinner across the left-wall descent corridor: balls hugging the left wall
+// (rollover exits, orbit shots) whip through it. Each revolution scores.
+export const SPINNER = {
+  x: -12.25,
+  y: 33.0,
+  halfW: 0.95,
+  triggerHalfH: 0.7,
+  spinsPerPass: 6, // base revolutions per pass, scaled by ball speed
+};
 
 export const PLUNGER = {
   x: (LANE_INNER_X + TABLE_HALF_W) / 2,

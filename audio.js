@@ -159,6 +159,67 @@ export const Sfx = {
   uiClick() {
     tone(440, { type: 'square', dur: 0.05, gain: 0.2 });
   },
+  // sharp rubber "thwack" of a slingshot kicker
+  slingshot() {
+    noiseBurst({ dur: 0.05, gain: 0.4, filterFreq: 1800, filterType: 'bandpass' });
+    tone(180, { type: 'square', dur: 0.08, gain: 0.32, glideTo: 90 });
+  },
+  // rapid metallic ticking as the spinner whirls
+  spinnerTick() {
+    tone(1900 + Math.random() * 300, { type: 'square', dur: 0.03, gain: 0.14 });
+  },
+  // a drop target collapsing into the playfield
+  dropTarget() {
+    noiseBurst({ dur: 0.06, gain: 0.32, filterFreq: 900, filterType: 'lowpass' });
+    tone(520, { type: 'triangle', dur: 0.09, gain: 0.26, glideTo: 260 });
+  },
+  // full bank completed: targets reset with a rising sweep
+  bankComplete() {
+    chime([659, 880, 1174, 1568], { dur: 0.1, gap: 0.055, type: 'square', gain: 0.3 });
+  },
+  // kickback firing the ball out of the outlane
+  kickback() {
+    tone(120, { type: 'sawtooth', dur: 0.22, gain: 0.4, glideTo: 700 });
+    noiseBurst({ dur: 0.12, gain: 0.22, filterFreq: 2400, filterType: 'highpass' });
+  },
+  jackpot() {
+    chime([784, 1046, 1318, 1568, 2093], { dur: 0.12, gap: 0.06, type: 'square', gain: 0.34 });
+  },
+  superJackpot() {
+    chime([523, 784, 1046, 1318, 1568, 2093, 2637], { dur: 0.13, gap: 0.055, type: 'sawtooth', gain: 0.32 });
+  },
+  modeStart() {
+    tone(220, { type: 'sawtooth', dur: 0.4, gain: 0.3, glideTo: 880 });
+    chime([880, 1174, 1568], { dur: 0.1, gap: 0.08, type: 'square', gain: 0.26 });
+  },
+  modeComplete() {
+    chime([1046, 1318, 1568, 2093, 1568, 2093], { dur: 0.11, gap: 0.06, type: 'triangle', gain: 0.32 });
+  },
+  modeFail() {
+    chime([440, 349, 293], { dur: 0.16, gap: 0.12, type: 'sawtooth', gain: 0.26 });
+  },
+  wizardStart() {
+    tone(110, { type: 'sawtooth', dur: 1.0, gain: 0.34, glideTo: 1760 });
+    chime([523, 659, 784, 1046, 1318, 1568, 2093], { dur: 0.14, gap: 0.07, type: 'square', gain: 0.3 });
+  },
+  // one tick of the end-of-ball bonus count-up
+  bonusTick() {
+    tone(980 + Math.random() * 120, { type: 'triangle', dur: 0.05, gain: 0.22 });
+  },
+  extraBall() {
+    chime([784, 784, 1174, 1174, 1568], { dur: 0.1, gap: 0.07, type: 'square', gain: 0.34 });
+  },
+  // classic end-of-game match sequence: knocker thump on a hit
+  matchHit() {
+    noiseBurst({ dur: 0.08, gain: 0.5, filterFreq: 700, filterType: 'lowpass' });
+    tone(90, { type: 'square', dur: 0.2, gain: 0.4, glideTo: 55 });
+  },
+  matchMiss() {
+    tone(340, { type: 'sine', dur: 0.2, gain: 0.2, glideTo: 180 });
+  },
+  comboShot() {
+    chime([1318, 1760], { dur: 0.08, gap: 0.04, type: 'triangle', gain: 0.3 });
+  },
 };
 
 // =====================================================================
@@ -169,6 +230,12 @@ let musicGain = null;
 let droneNodes = null;
 let musicTimer = null;
 let musicStep = 0;
+let musicIntense = false;
+
+// During modes/multiball the arpeggio doubles up an octave for urgency.
+export function setMusicIntensity(intense) {
+  musicIntense = !!intense;
+}
 
 // Two bars of an A-minor-ish cyberpunk arpeggio (Hz). null = rest.
 const MUSIC_SEQ = [
@@ -220,6 +287,20 @@ export function startMusic() {
     g.connect(musicGain);
     osc.start(t0);
     osc.stop(t0 + 0.33);
+    // intensity layer: echo the note an octave up on the off-beat
+    if (musicIntense) {
+      const osc2 = cc.createOscillator();
+      osc2.type = 'square';
+      osc2.frequency.value = f * 2;
+      const g2 = cc.createGain();
+      g2.gain.setValueAtTime(0.0001, t0 + 0.11);
+      g2.gain.linearRampToValueAtTime(0.22, t0 + 0.13);
+      g2.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.28);
+      osc2.connect(g2);
+      g2.connect(musicGain);
+      osc2.start(t0 + 0.11);
+      osc2.stop(t0 + 0.31);
+    }
   }, STEP_MS);
 }
 
